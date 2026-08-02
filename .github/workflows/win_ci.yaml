@@ -60,38 +60,51 @@ jobs:
           New-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem' `
             -Name 'LongPathsEnabled' -Value 1 -PropertyType DWORD -Force
 
-      # Visual Studio 2022 comes preinstalled on the windows-2025 runner, so no
-      # explicit install step is needed. However, run_ros2_batch.py hardcodes
-      # the vcvarsall.bat path to the "BuildTools" edition under
+      # Install the Visual Studio 2022 BuildTools edition with the same
+      # component set as the Dockerfile. run_ros2_batch.py hardcodes the
+      # vcvarsall.bat path to the BuildTools edition under
       #   C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\...
-      # (see ros2_batch_job/windows_batch/__init__.py). The runner ships the
-      # Enterprise edition at a different path, so we locate the real install
-      # with vswhere and create a directory symlink at the expected location.
-      # Without this, env.bat calls a non-existent vcvarsall.bat, VisualStudioVersion
-      # never gets set, and colcon fails with
-      #   "VisualStudioVersion is not set, please run within a Visual Studio Command Prompt."
-      - name: Link preinstalled VS 2022 to the expected BuildTools path
+      # (see ros2_batch_job/windows_batch/__init__.py), and the
+      # "Visual Studio 17 2022" CMake generator requires a genuine VS 2022
+      # instance registered in the setup catalog. The windows-2025 runner ships
+      # a newer VS edition, not 2022, so we install BuildTools 2022 explicitly.
+      # This lands at the exact path the batch script expects and registers a
+      # real 2022 instance for the generator to find. The vs/17 channel always
+      # resolves to the latest 2022 release. Exit code 3010 (reboot required) is
+      # treated as success.
+      - name: Install Visual Studio 2022 build tools
         shell: powershell
         run: |
+          irm https://aka.ms/vs/17/release/vs_buildtools.exe -OutFile vs_buildtools_2022.exe
+          $vsArgs = @(
+            '--quiet','--wait','--norestart','--nocache',
+            '--installPath','C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools',
+            '--add','Microsoft.Component.MSBuild',
+            '--add','Microsoft.Net.Component.4.6.1.TargetingPack',
+            '--add','Microsoft.Net.Component.4.8.SDK',
+            '--add','Microsoft.VisualStudio.Component.CoreBuildTools',
+            '--add','Microsoft.VisualStudio.Component.Roslyn.Compiler',
+            '--add','Microsoft.VisualStudio.Component.TextTemplating',
+            '--add','Microsoft.VisualStudio.Component.VC.CLI.Support',
+            '--add','Microsoft.VisualStudio.Component.VC.CoreBuildTools',
+            '--add','Microsoft.VisualStudio.Component.VC.CoreIde',
+            '--add','Microsoft.VisualStudio.Component.VC.Redist.14.Latest',
+            '--add','Microsoft.VisualStudio.Component.VC.Tools.x86.x64',
+            '--add','Microsoft.VisualStudio.Component.Windows10SDK',
+            '--add','Microsoft.VisualStudio.Component.Windows10SDK.19041',
+            '--add','Microsoft.VisualStudio.ComponentGroup.NativeDesktop.Core',
+            '--add','Microsoft.VisualStudio.Workload.MSBuildTools',
+            '--add','Microsoft.VisualStudio.Workload.VCTools'
+          )
+          $p = Start-Process -FilePath .\vs_buildtools_2022.exe -ArgumentList $vsArgs -Wait -PassThru -NoNewWindow
+          if ($p.ExitCode -ne 0 -and $p.ExitCode -ne 3010) {
+            Write-Error "VS build tools install failed with exit code $($p.ExitCode)"
+            exit $p.ExitCode
+          }
+          # Confirm the generator will find a genuine 2022 instance.
           $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-          if (-not (Test-Path $vswhere)) { Write-Error "vswhere.exe not found"; exit 1 }
-          $vsRoot = & $vswhere -latest -products * `
-            -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
-            -property installationPath
-          if (-not $vsRoot) { Write-Error "No VS install with VC tools found"; exit 1 }
-          Write-Host "Found Visual Studio at: $vsRoot"
-          if (-not (Test-Path (Join-Path $vsRoot 'VC\Auxiliary\Build\vcvarsall.bat'))) {
-            Write-Error "vcvarsall.bat not found under $vsRoot"; exit 1
-          }
-          $expected = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\2022\BuildTools"
-          $parent = Split-Path $expected -Parent
-          New-Item -ItemType Directory -Force -Path $parent | Out-Null
-          if (Test-Path $expected) {
-            Write-Host "$expected already exists; leaving it in place."
-          } else {
-            New-Item -ItemType Junction -Path $expected -Target $vsRoot | Out-Null
-            Write-Host "Linked $expected -> $vsRoot"
-          }
+          & $vswhere -products * -version "[17.0,18.0)" -property installationPath
+
 
       # Dockerfile: fetch a pinned pixi, verify checksum, extract, add to PATH.
       - name: Install pixi (pinned + checksum verified)
