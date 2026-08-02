@@ -1,0 +1,154 @@
+name: Windows CI
+
+# Replicates windows_docker_resources/Dockerfile on a GitHub-hosted Windows
+# Server 2025 runner, excluding the RTI Connext DDS installation steps.
+#
+# This workflow explicitly installs the Visual Studio 2022 build tools with the
+# same component list as the Dockerfile, adds long-path support, installs a
+# pinned pixi, resolves the ROS 2 pixi.toml dependencies, and runs
+# run_ros2_batch.py.
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      ros_distro:
+        description: ROS 2 distribution (matches a branch on ros2/ros2)
+        default: rolling
+        type: string
+      ci_args:
+        description: Arguments passed to run_ros2_batch.py
+        default: >-
+          --force-ansi-color
+          --workspace-path C:\ci
+          --ignore-rmw rmw_connextdds
+          --repo-file-url https://raw.githubusercontent.com/ros2/ros2/rolling/ros2.repos
+          --colcon-mixin-url https://raw.githubusercontent.com/colcon/colcon-mixin-repository/master/index.yaml
+          --visual-studio-version 2022
+          --build-args --event-handlers console_cohesion+ console_package_list+
+          --cmake-args -DINSTALL_EXAMPLES=OFF -DSECURITY=ON -DAPPEND_PROJECT_NAME_TO_INCLUDEDIR=ON
+          --packages-up-to rclcpp
+          --test-args --event-handlers console_direct+ --executor sequential
+          --retest-until-pass 2 --ctest-args -LE xfail --pytest-args -m "not xfail"
+          --packages-up-to rclcpp
+        type: string
+
+env:
+  ROS_DISTRO: ${{ inputs.ros_distro || 'rolling' }}
+  PIXI_VERSION: v0.41.0
+  PIXI_SHA256: 16b1b83f2d6f04a990ef7c6eea2bb45d2e846d122be312ca3f5f1b14be7cdc6d
+
+jobs:
+  windows-ci:
+    runs-on: windows-2025
+    timeout-minutes: 180
+    env:
+      ROS_DOMAIN_ID: 1
+      # Mirrors the CMD in the Dockerfile. Overridable via workflow_dispatch.
+      CI_ARGS: ${{ inputs.ci_args || '--force-ansi-color --workspace-path C:\ci --ignore-rmw rmw_connextdds --repo-file-url https://raw.githubusercontent.com/ros2/ros2/rolling/ros2.repos --colcon-mixin-url https://raw.githubusercontent.com/colcon/colcon-mixin-repository/master/index.yaml --visual-studio-version 2022 --build-args --event-handlers console_cohesion+ console_package_list+ --cmake-args -DINSTALL_EXAMPLES=OFF -DSECURITY=ON -DAPPEND_PROJECT_NAME_TO_INCLUDEDIR=ON --packages-up-to rclcpp --test-args --event-handlers console_direct+ --executor sequential --retest-until-pass 2 --ctest-args -LE xfail --pytest-args -m "not xfail" --packages-up-to rclcpp' }}
+
+    steps:
+      - name: Checkout ci repository
+        uses: actions/checkout@v4
+
+      # Dockerfile: enable long paths on folders.
+      - name: Enable long paths
+        shell: powershell
+        run: |
+          New-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem' `
+            -Name 'LongPathsEnabled' -Value 1 -PropertyType DWORD -Force
+
+      # Visual Studio 2022 comes preinstalled on the windows-2025 runner, so no
+      # explicit install step is needed. However, run_ros2_batch.py hardcodes
+      # the vcvarsall.bat path to the "BuildTools" edition under
+      #   C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\...
+      # (see ros2_batch_job/windows_batch/__init__.py). The runner ships the
+      # Enterprise edition at a different path, so we locate the real install
+      # with vswhere and create a directory symlink at the expected location.
+      # Without this, env.bat calls a non-existent vcvarsall.bat, VisualStudioVersion
+      # never gets set, and colcon fails with
+      #   "VisualStudioVersion is not set, please run within a Visual Studio Command Prompt."
+      - name: Link preinstalled VS 2022 to the expected BuildTools path
+        shell: powershell
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          if (-not (Test-Path $vswhere)) { Write-Error "vswhere.exe not found"; exit 1 }
+          $vsRoot = & $vswhere -latest -products * `
+            -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
+            -property installationPath
+          if (-not $vsRoot) { Write-Error "No VS install with VC tools found"; exit 1 }
+          Write-Host "Found Visual Studio at: $vsRoot"
+          if (-not (Test-Path (Join-Path $vsRoot 'VC\Auxiliary\Build\vcvarsall.bat'))) {
+            Write-Error "vcvarsall.bat not found under $vsRoot"; exit 1
+          }
+          $expected = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\2022\BuildTools"
+          $parent = Split-Path $expected -Parent
+          New-Item -ItemType Directory -Force -Path $parent | Out-Null
+          if (Test-Path $expected) {
+            Write-Host "$expected already exists; leaving it in place."
+          } else {
+            New-Item -ItemType Junction -Path $expected -Target $vsRoot | Out-Null
+            Write-Host "Linked $expected -> $vsRoot"
+          }
+
+      # Dockerfile: fetch a pinned pixi, verify checksum, extract, add to PATH.
+      - name: Install pixi (pinned + checksum verified)
+        shell: powershell
+        run: |
+          $url = "https://github.com/prefix-dev/pixi/releases/download/$env:PIXI_VERSION/pixi-x86_64-pc-windows-msvc.zip"
+          irm $url -OutFile pixi-x86_64-pc-windows-msvc.zip
+          $hash = (Get-FileHash pixi-x86_64-pc-windows-msvc.zip -Algorithm SHA256).Hash
+          if ($hash -ne $env:PIXI_SHA256) {
+            Write-Error "pixi checksum mismatch: got $hash expected $env:PIXI_SHA256"
+            exit 1
+          }
+          $bindir = Join-Path $Env:USERPROFILE ".pixi\bin"
+          Expand-Archive -Path pixi-x86_64-pc-windows-msvc.zip -DestinationPath $bindir -Force
+          # Persist on PATH for subsequent steps.
+          Add-Content -Path $env:GITHUB_PATH -Value $bindir
+
+      # Dockerfile: ADD the distro pixi.toml, install and list deps.
+      - name: Fetch pixi.toml for ROS distro
+        shell: powershell
+        run: |
+          New-Item -ItemType Directory -Force -Path C:\pixi_ws | Out-Null
+          $url = "https://raw.githubusercontent.com/ros2/ros2/refs/heads/$env:ROS_DISTRO/pixi.toml"
+          if (-not $url.StartsWith('https://')) { Write-Error 'URL must use HTTPS'; exit 1 }
+          irm $url -OutFile C:\pixi_ws\pixi.toml
+
+      - name: Install pixi dependencies
+        shell: powershell
+        working-directory: C:\pixi_ws
+        run: |
+          pixi --color never --no-progress -q install
+          pixi --color never --no-progress -q list
+
+      # Dockerfile: ensure required colcon-ros-domain-id-coordinator version.
+      - name: Ensure colcon-ros-domain-id-coordinator
+        shell: powershell
+        working-directory: C:\pixi_ws
+        run: |
+          pixi --color never --no-progress -q run `
+            "pip install 'colcon-ros-domain-id-coordinator >= 0.2.3'"
+
+      # NOTE: Connext (rti_web_binaries_install_script.ps1, license, src) is
+      # intentionally omitted. Builds must pass --ignore-rmw rmw_connextdds.
+
+      # Dockerfile CMD: run the batch job.
+      - name: Run ROS 2 batch job
+        shell: cmd
+        run: >-
+          pixi run --manifest-path C:\pixi_ws\pixi.toml --frozen
+          python run_ros2_batch.py %CI_ARGS%
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ros2-ci-results
+          path: |
+            C:\ci\test_results\**
+            C:\ci\**\*.xml
+          if-no-files-found: ignore
