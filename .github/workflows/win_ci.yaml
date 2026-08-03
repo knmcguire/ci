@@ -41,7 +41,7 @@ env:
 jobs:
   windows-ci:
     runs-on: windows-2025
-    timeout-minutes: 180
+    timeout-minutes: 350
     env:
       ROS_DOMAIN_ID: 1
       # The batch job creates its workspace ('ws') under the current working
@@ -103,9 +103,28 @@ jobs:
             Write-Error "VS build tools install failed with exit code $($p.ExitCode)"
             exit $p.ExitCode
           }
-          # Confirm the generator will find a genuine 2022 instance.
+          if ($p.ExitCode -eq 3010) {
+            Write-Host "Installer returned 3010 (reboot required to finalize)."
+          }
+          # Gate: verify a COMPLETE, launchable VS 2022 instance with the C++
+          # toolset is registered. The default vswhere query (no -all/-prerelease)
+          # returns only instances with isComplete=1, which is exactly what the
+          # "Visual Studio 17 2022" CMake generator requires. An instance can be
+          # on disk (cl.exe works) yet isComplete=0 after a quiet/norestart
+          # install, in which case the generator fails later with "could not find
+          # any instance of Visual Studio". Fail here instead, with a clear cause.
           $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-          & $vswhere -products * -version "[17.0,18.0)" -property installationPath
+          $inst = & $vswhere -products * -version "[17.0,18.0)" `
+            -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
+            -property installationPath
+          if (-not $inst) {
+            Write-Host "No complete VS 2022 instance found. Full catalog state (incl. incomplete):"
+            & $vswhere -all -prerelease -products * `
+              -property installationName -property installationVersion -property isComplete -property isLaunchable
+            Write-Error "Visual Studio 2022 is not properly installed (no complete instance with the C++ toolset). Failing before the build."
+            exit 1
+          }
+          Write-Host "Verified complete VS 2022 instance: $inst"
 
       # Dockerfile: fetch a pinned pixi, verify checksum, extract, add to PATH.
       - name: Install pixi (pinned + checksum verified)
