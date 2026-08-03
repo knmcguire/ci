@@ -1,0 +1,339 @@
+name: Windows CI (Ninja)
+
+# Replicates windows_docker_resources/Dockerfile on a GitHub-hosted Windows
+# Server 2025 runner, excluding the RTI Connext DDS installation steps.
+#
+# This variant uses the Ninja CMake generator instead of the Visual Studio
+# generator. The VS 2022 build tools are still installed and vcvars64.bat is
+# still sourced (Ninja finds cl.exe on PATH from vcvars); Ninja just avoids
+# CMake's VS-instance discovery. Note: the Rust-based zenoh vendor can fail to
+# link under Ninja if the pixi environment's coreutils 'link.exe' shadows the
+# MSVC linker on PATH; exclude zenoh or fix PATH ordering if that occurs.
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      ros_distro:
+        description: ROS 2 distribution (matches a branch on ros2/ros2)
+        default: rolling
+        type: string
+      ci_args:
+        description: Arguments passed to run_ros2_batch.py
+        default: >-
+          --force-ansi-color
+          --ignore-rmw rmw_fastrtps_dynamic_cpp rmw_connextdds
+          --repo-file-url https://raw.githubusercontent.com/ros2/ros2/rolling/ros2.repos
+          --colcon-mixin-url https://raw.githubusercontent.com/colcon/colcon-mixin-repository/master/index.yaml
+          --cmake-build-type Release
+          --visual-studio-version 2022
+          --build-args --event-handlers console_cohesion+ console_package_list+
+          --cmake-args -G Ninja -DCMAKE_BUILD_TYPE=Release -DINSTALL_EXAMPLES=OFF -DSECURITY=ON -DAPPEND_PROJECT_NAME_TO_INCLUDEDIR=ON
+          --test-args --event-handlers console_cohesion+
+          --retest-until-pass 2 --ctest-args -LE xfail --pytest-args -m "not xfail"
+        type: string
+
+env:
+  ROS_DISTRO: ${{ inputs.ros_distro || 'rolling' }}
+  PIXI_VERSION: v0.41.0
+  PIXI_SHA256: 16b1b83f2d6f04a990ef7c6eea2bb45d2e846d122be312ca3f5f1b14be7cdc6d
+
+jobs:
+  windows-ci:
+    runs-on: windows-2025
+    timeout-minutes: 350
+    env:
+      ROS_DOMAIN_ID: 1
+      # The batch job creates its workspace ('ws') under the current working
+      # directory, which is the checkout root (github.workspace, e.g.
+      # D:\a\ci\ci on hosted Windows runners). All colcon output lands here.
+      WS_PATH: ${{ github.workspace }}\ws
+      # Mirrors the CMD in the Dockerfile. Overridable via workflow_dispatch.
+      CI_ARGS: ${{ inputs.ci_args || '--force-ansi-color --ignore-rmw rmw_fastrtps_dynamic_cpp rmw_connextdds --repo-file-url https://raw.githubusercontent.com/ros2/ros2/rolling/ros2.repos --colcon-mixin-url https://raw.githubusercontent.com/colcon/colcon-mixin-repository/master/index.yaml --cmake-build-type Release --visual-studio-version 2022 --build-args --event-handlers console_cohesion+ console_package_list+ --cmake-args -G Ninja -DCMAKE_BUILD_TYPE=Release -DINSTALL_EXAMPLES=OFF -DSECURITY=ON -DAPPEND_PROJECT_NAME_TO_INCLUDEDIR=ON --test-args --event-handlers console_cohesion+ --retest-until-pass 2 --ctest-args -LE xfail --pytest-args -m "not xfail"' }}
+
+    steps:
+      - name: Checkout ci repository
+        uses: actions/checkout@v4
+
+      # Dockerfile: enable long paths on folders.
+      - name: Enable long paths
+        shell: powershell
+        run: |
+          New-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem' `
+            -Name 'LongPathsEnabled' -Value 1 -PropertyType DWORD -Force
+
+      # Install the Visual Studio 2022 BuildTools edition with the same
+      # component set as the Dockerfile. run_ros2_batch.py hardcodes the
+      # vcvarsall.bat path to the BuildTools edition under
+      #   C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\...
+      # (see ros2_batch_job/windows_batch/__init__.py), and the
+      # "Visual Studio 17 2022" CMake generator requires a genuine VS 2022
+      # instance registered in the setup catalog. The windows-2025 runner ships
+      # a newer VS edition, not 2022, so we install BuildTools 2022 explicitly.
+      # This lands at the exact path the batch script expects and registers a
+      # real 2022 instance for the generator to find. The vs/17 channel always
+      # resolves to the latest 2022 release. Exit code 3010 (reboot required) is
+      # treated as success.
+      - name: Install Visual Studio 2022 build tools
+        shell: powershell
+        run: |
+          irm https://aka.ms/vs/17/release/vs_buildtools.exe -OutFile vs_buildtools_2022.exe
+          $vsArgs = @(
+            '--quiet','--wait','--norestart','--nocache',
+            '--installPath','C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools',
+            '--add','Microsoft.Component.MSBuild',
+            '--add','Microsoft.Net.Component.4.6.1.TargetingPack',
+            '--add','Microsoft.Net.Component.4.8.SDK',
+            '--add','Microsoft.VisualStudio.Component.CoreBuildTools',
+            '--add','Microsoft.VisualStudio.Component.Roslyn.Compiler',
+            '--add','Microsoft.VisualStudio.Component.TextTemplating',
+            '--add','Microsoft.VisualStudio.Component.VC.CLI.Support',
+            '--add','Microsoft.VisualStudio.Component.VC.CoreBuildTools',
+            '--add','Microsoft.VisualStudio.Component.VC.CoreIde',
+            '--add','Microsoft.VisualStudio.Component.VC.Redist.14.Latest',
+            '--add','Microsoft.VisualStudio.Component.VC.Tools.x86.x64',
+            '--add','Microsoft.VisualStudio.Component.Windows10SDK',
+            '--add','Microsoft.VisualStudio.Component.Windows10SDK.19041',
+            '--add','Microsoft.VisualStudio.ComponentGroup.NativeDesktop.Core',
+            '--add','Microsoft.VisualStudio.Workload.MSBuildTools',
+            '--add','Microsoft.VisualStudio.Workload.VCTools'
+          )
+          $p = Start-Process -FilePath .\vs_buildtools_2022.exe -ArgumentList $vsArgs -Wait -PassThru -NoNewWindow
+          if ($p.ExitCode -ne 0 -and $p.ExitCode -ne 3010) {
+            Write-Error "VS build tools install failed with exit code $($p.ExitCode)"
+            exit $p.ExitCode
+          }
+          if ($p.ExitCode -eq 3010) {
+            Write-Host "Installer returned 3010 (reboot required to finalize)."
+          }
+          # Gate: verify a COMPLETE, launchable VS 2022 instance with the C++
+          # toolset is registered. The default vswhere query (no -all/-prerelease)
+          # returns only instances with isComplete=1, which is exactly what the
+          # "Visual Studio 17 2022" CMake generator requires. An instance can be
+          # on disk (cl.exe works) yet isComplete=0 after a quiet/norestart
+          # install, in which case the generator fails later with "could not find
+          # any instance of Visual Studio". Fail here instead, with a clear cause.
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $inst = & $vswhere -products * -version "[17.0,18.0)" `
+            -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
+            -property installationPath
+          if (-not $inst) {
+            Write-Host "No complete VS 2022 instance found. Full catalog state (incl. incomplete):"
+            & $vswhere -all -prerelease -products * `
+              -property installationName -property installationVersion -property isComplete -property isLaunchable
+            Write-Error "Visual Studio 2022 is not properly installed (no complete instance with the C++ toolset). Failing before the build."
+            exit 1
+          }
+          Write-Host "Verified complete VS 2022 instance: $inst"
+
+      # Dockerfile: fetch a pinned pixi, verify checksum, extract, add to PATH.
+      - name: Install pixi (pinned + checksum verified)
+        shell: powershell
+        run: |
+          $url = "https://github.com/prefix-dev/pixi/releases/download/$env:PIXI_VERSION/pixi-x86_64-pc-windows-msvc.zip"
+          irm $url -OutFile pixi-x86_64-pc-windows-msvc.zip
+          $hash = (Get-FileHash pixi-x86_64-pc-windows-msvc.zip -Algorithm SHA256).Hash
+          if ($hash -ne $env:PIXI_SHA256) {
+            Write-Error "pixi checksum mismatch: got $hash expected $env:PIXI_SHA256"
+            exit 1
+          }
+          $bindir = Join-Path $Env:USERPROFILE ".pixi\bin"
+          Expand-Archive -Path pixi-x86_64-pc-windows-msvc.zip -DestinationPath $bindir -Force
+          # Persist on PATH for subsequent steps.
+          Add-Content -Path $env:GITHUB_PATH -Value $bindir
+
+      # Dockerfile: ADD the distro pixi.toml, install and list deps.
+      - name: Fetch pixi.toml for ROS distro
+        shell: powershell
+        run: |
+          New-Item -ItemType Directory -Force -Path C:\pixi_ws | Out-Null
+          $url = "https://raw.githubusercontent.com/ros2/ros2/refs/heads/$env:ROS_DISTRO/pixi.toml"
+          if (-not $url.StartsWith('https://')) { Write-Error 'URL must use HTTPS'; exit 1 }
+          irm $url -OutFile C:\pixi_ws\pixi.toml
+
+      - name: Install pixi dependencies
+        shell: powershell
+        working-directory: C:\pixi_ws
+        run: |
+          pixi --color never --no-progress -q install
+          pixi --color never --no-progress -q list
+
+      # The Ninja generator requires the ninja executable. It is normally pulled
+      # in by the ROS 2 pixi.toml, but ensure it is present so a missing-ninja
+      # failure surfaces here rather than mid-configure.
+      - name: Ensure Ninja is available
+        shell: powershell
+        working-directory: C:\pixi_ws
+        run: |
+          $found = pixi --color never --no-progress -q run "where ninja" 2>$null
+          if (-not $found) {
+            Write-Host "ninja not found in pixi env; installing via pip."
+            pixi --color never --no-progress -q run "pip install ninja"
+          } else {
+            Write-Host "ninja found: $found"
+          }
+
+      # Dockerfile: ensure required colcon-ros-domain-id-coordinator version.
+      - name: Ensure colcon-ros-domain-id-coordinator
+        shell: powershell
+        working-directory: C:\pixi_ws
+        run: |
+          pixi --color never --no-progress -q run `
+            "pip install 'colcon-ros-domain-id-coordinator >= 0.2.3'"
+
+      # NOTE: Connext (rti_web_binaries_install_script.ps1, license, src) is
+      # intentionally omitted. Builds must pass --ignore-rmw rmw_connextdds.
+
+      # Locate the VS 2022 install with vswhere (PowerShell handles the spaced
+      # install path cleanly) and export it for the batch step to source.
+      - name: Locate Visual Studio 2022
+        shell: powershell
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          if (-not (Test-Path $vswhere)) { Write-Error "vswhere.exe not found"; exit 1 }
+          $vsRoot = & $vswhere -products * -version '[17.0,18.0)' -latest -property installationPath
+          if (-not $vsRoot) { Write-Error "No Visual Studio 2022 (17.x) instance found"; exit 1 }
+          $vcvars = Join-Path $vsRoot 'VC\Auxiliary\Build\vcvars64.bat'
+          if (-not (Test-Path $vcvars)) { Write-Error "vcvars64.bat not found under $vsRoot"; exit 1 }
+          Write-Host "Found Visual Studio at: $vsRoot"
+          "VCVARS64=$vcvars" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      # Dockerfile CMD: run the batch job.
+      #
+      # colcon_cmake requires the MSVC environment (VisualStudioVersion et al.)
+      # to be present in the shell. run_ros2_batch.py generates an env.bat that
+      # calls vcvarsall.bat by a hardcoded path, but to be robust we source the
+      # real vcvars64.bat (located in the previous step) ourselves so the batch
+      # job inherits a fully configured environment. We fail early with a clear
+      # message if VisualStudioVersion isn't set, rather than deep inside colcon.
+      - name: Run ROS 2 batch job
+        shell: cmd
+        run: |
+          call "%VCVARS64%"
+          if errorlevel 1 (
+            echo ERROR: vcvars64.bat failed.
+            exit /b 1
+          )
+          if not defined VisualStudioVersion (
+            echo ERROR: VisualStudioVersion is still not set after sourcing vcvars.
+            exit /b 1
+          )
+          echo VisualStudioVersion=%VisualStudioVersion%
+          pixi run --manifest-path C:\pixi_ws\pixi.toml --frozen python run_ros2_batch.py %CI_ARGS%
+
+      # Diagnostic: show what actually landed on disk under the workspace so
+      # that empty/missing artifacts can be traced to a path mismatch or an
+      # early build failure. Runs even if the batch job failed.
+      - name: List workspace contents (diagnostic)
+        if: always()
+        shell: powershell
+        run: |
+          $ws = $env:WS_PATH
+          foreach ($p in @($env:GITHUB_WORKSPACE, $ws, "$ws\log", "$ws\build")) {
+            Write-Host "==== $p ===="
+            if (Test-Path $p) {
+              Get-ChildItem -Path $p -Force -ErrorAction SilentlyContinue |
+                Select-Object Mode, LastWriteTime, Length, Name | Format-Table -AutoSize | Out-String | Write-Host
+            } else {
+              Write-Host "(does not exist)"
+            }
+          }
+          Write-Host "==== stdout_stderr.log files under $ws ===="
+          if (Test-Path $ws) {
+            Get-ChildItem -Path $ws -Recurse -File -Include 'stdout_stderr.log' -ErrorAction SilentlyContinue |
+              Select-Object -ExpandProperty FullName | Write-Host
+          }
+
+      # Extract compiler warnings and errors from the colcon logs and write a
+      # summary to the GitHub step summary. The batch job builds inside
+      # <workspace>\ws, so colcon logs land in <workspace>\ws\log with
+      # per-package stdout_stderr.log files. Runs even if the build step failed.
+      - name: Summarize build warnings and errors
+        if: always()
+        shell: powershell
+        run: |
+          $logRoot = "$env:WS_PATH\log"
+          if (-not (Test-Path $logRoot)) {
+            "No colcon log directory found at $logRoot." | Tee-Object -FilePath $env:GITHUB_STEP_SUMMARY -Append
+            exit 0
+          }
+          # Collect per-package stdout/stderr logs.
+          $logs = Get-ChildItem -Path $logRoot -Recurse -File -Include 'stdout_stderr.log','stderr.log','stdout.log' -ErrorAction SilentlyContinue
+          # MSVC diagnostics look like "file(line): warning C1234:" / "error C1234:";
+          # CMake and linker diagnostics use "error:"/"warning:" as well.
+          $pattern = '(?i):\s+(warning|error)\b|:\s+(warning|error)\s+[A-Z]{1,3}\d+|\berror\b:|\bwarning\b:'
+          $warnings = @()
+          $errors = @()
+          foreach ($f in $logs) {
+            $pkg = Split-Path (Split-Path $f.FullName -Parent) -Leaf
+            foreach ($line in Get-Content -LiteralPath $f.FullName -ErrorAction SilentlyContinue) {
+              if ($line -match ':\s+error\b' -or $line -match '\berror\s+[A-Z]{1,3}\d+' -or $line -match '(?i)\berror:') {
+                $errors += "[$pkg] $($line.Trim())"
+              } elseif ($line -match ':\s+warning\b' -or $line -match '\bwarning\s+[A-Z]{1,3}\d+' -or $line -match '(?i)\bwarning:') {
+                $warnings += "[$pkg] $($line.Trim())"
+              }
+            }
+          }
+          # De-duplicate while preserving order.
+          $errors = $errors | Select-Object -Unique
+          $warnings = $warnings | Select-Object -Unique
+
+          $sb = New-Object System.Text.StringBuilder
+          [void]$sb.AppendLine("## Build diagnostics summary")
+          [void]$sb.AppendLine("")
+          [void]$sb.AppendLine("- Errors: $($errors.Count)")
+          [void]$sb.AppendLine("- Warnings: $($warnings.Count)")
+          [void]$sb.AppendLine("")
+          if ($errors.Count -gt 0) {
+            [void]$sb.AppendLine("### Errors")
+            [void]$sb.AppendLine('```')
+            $errors | Select-Object -First 200 | ForEach-Object { [void]$sb.AppendLine($_) }
+            if ($errors.Count -gt 200) { [void]$sb.AppendLine("... ($($errors.Count - 200) more, see artifact)") }
+            [void]$sb.AppendLine('```')
+          }
+          if ($warnings.Count -gt 0) {
+            [void]$sb.AppendLine("### Warnings")
+            [void]$sb.AppendLine('```')
+            $warnings | Select-Object -First 200 | ForEach-Object { [void]$sb.AppendLine($_) }
+            if ($warnings.Count -gt 200) { [void]$sb.AppendLine("... ($($warnings.Count - 200) more, see artifact)") }
+            [void]$sb.AppendLine('```')
+          }
+          $summary = $sb.ToString()
+          $summary | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+          # Also write to files so they can be uploaded as artifacts.
+          New-Item -ItemType Directory -Force -Path "$env:GITHUB_WORKSPACE\diagnostics" | Out-Null
+          $errors   | Out-File -FilePath "$env:GITHUB_WORKSPACE\diagnostics\errors.txt"   -Encoding utf8
+          $warnings | Out-File -FilePath "$env:GITHUB_WORKSPACE\diagnostics\warnings.txt" -Encoding utf8
+          Write-Host "Found $($errors.Count) error line(s) and $($warnings.Count) warning line(s)."
+
+      # Upload the extracted warnings/errors summary files.
+      - name: Upload diagnostics summary
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-diagnostics
+          path: ${{ github.workspace }}\diagnostics\**
+          if-no-files-found: warn
+
+      # Upload the full colcon logs (per-package stdout/stderr, command lines,
+      # CMake output) so warnings and errors can be inspected in full context.
+      - name: Upload colcon logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: colcon-logs
+          path: ${{ github.workspace }}\ws\log\**
+          if-no-files-found: warn
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ros2-ci-results
+          path: |
+            ${{ github.workspace }}\ws\build\**\Testing\**
+            ${{ github.workspace }}\ws\build\**\test_results\**
+            ${{ github.workspace }}\ws\**\*.xml
+          if-no-files-found: warn
