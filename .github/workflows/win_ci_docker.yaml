@@ -1,0 +1,128 @@
+name: Windows CI (Docker container)
+
+# Container-based variant: builds the Windows Server container image from
+# windows_docker_resources/Dockerfile and runs run_ros2_batch.py *inside* the
+# container, mirroring how the Jenkins (AWS) nightly runs. This exists to
+# investigate whether running in a Windows container (vs directly on the runner)
+# explains infrastructural differences between Jenkins and GitHub Actions.
+#
+# Connext is omitted (patched Dockerfile at windows_docker_resources/Dockerfile
+# in this repo path). RTI steps are removed; keep --ignore-rmw rmw_connextdds.
+#
+# IMPORTANT constraints (see the Dockerfile comments):
+#   * The container base image (mcr.microsoft.com/windows/server:<ver>) must be
+#     the SAME or OLDER than the runner host build. If older, Hyper-V isolation
+#     is required for both build and run.
+#   * GitHub Actions' native `container:` key is Linux-only, so we drive Docker
+#     manually with `docker build` / `docker run` on a Windows runner.
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      ros_distro:
+        description: ROS 2 distribution
+        default: rolling
+        type: string
+      isolation:
+        description: Docker isolation mode (process is faster; hyperv needed if image is older than host)
+        default: process
+        type: choice
+        options:
+          - process
+          - hyperv
+      ci_args:
+        description: Arguments passed to run_ros2_batch.py (leave blank to use the default)
+        default: ''
+        type: string
+
+env:
+  ROS_DISTRO: ${{ inputs.ros_distro || 'rolling' }}
+  IMAGE_TAG: ros2-ci-windows:local
+
+jobs:
+  windows-ci-docker:
+    # windows-2022 is used deliberately: its host build is a known quantity, which
+    # matters for matching the container base image version. (windows-2025 may
+    # require a newer base image than the Dockerfile's default resolves to.)
+    runs-on: windows-2022
+    timeout-minutes: 350
+    env:
+      # Mirrors the CMD's %CI_ARGS%. Connext ignored (not installed in image).
+      CI_ARGS: ${{ inputs.ci_args || '--force-ansi-color --ignore-rmw rmw_fastrtps_dynamic_cpp rmw_connextdds --repo-file-url https://raw.githubusercontent.com/ros2/ros2/rolling/ros2.repos --colcon-mixin-url https://raw.githubusercontent.com/colcon/colcon-mixin-repository/master/index.yaml --cmake-build-type Release --visual-studio-version 2022 --build-args --event-handlers console_cohesion+ console_package_list+ --cmake-args -G "Visual Studio 17 2022" -A x64 -DINSTALL_EXAMPLES=OFF -DSECURITY=ON -DAPPEND_PROJECT_NAME_TO_INCLUDEDIR=ON --test-args --event-handlers console_cohesion+ --retest-until-pass 2 --ctest-args -LE xfail --pytest-args -m "not xfail"' }}
+
+    steps:
+      - name: Checkout ci repository
+        uses: actions/checkout@v4
+
+      # Docker is preinstalled on the windows-2022 runner. Record host + docker
+      # info: the host OS build determines which base image tag is compatible
+      # and whether Hyper-V isolation is required.
+      - name: Report host and Docker info
+        shell: powershell
+        run: |
+          Write-Host "== Host OS build =="
+          $cv = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion'
+          Write-Host ("ReleaseId    : {0}" -f $cv.ReleaseId)
+          Write-Host ("CurrentBuild : {0}" -f $cv.CurrentBuild)
+          Write-Host ("UBR          : {0}" -f $cv.UBR)
+          try {
+            $srv = Get-ItemProperty -Path 'HKLM:SOFTWARE\Microsoft\Windows NT\CurrentVersion\Update\TargetingInfo\Installed\Server.OS.amd64' -Name Version -ErrorAction Stop
+            Write-Host ("Server.OS ver: {0}" -f $srv.Version)
+          } catch { Write-Host "Server.OS.amd64 targeting info not present." }
+          Write-Host "== docker version =="
+          docker version
+          Write-Host "== docker info (isolation, os) =="
+          docker info
+
+      # Build the image. The base image version defaults to the Dockerfile's ARG
+      # (2009); if that is older than the host it will require Hyper-V isolation.
+      # We pass the host's build as WINDOWS_RELEASE_VERSION so the base image
+      # matches the host and process isolation can be used.
+      - name: Build container image
+        shell: powershell
+        run: |
+          $cv = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion'
+          # Compose a base-image tag matching the host build (e.g. "10.0.20348.xxxx").
+          # mcr Windows Server images are tagged by build; use ltsc2022 for build 20348.
+          $baseTag = switch ($cv.CurrentBuild) {
+            '20348' { 'ltsc2022' }        # Windows Server 2022
+            '17763' { 'ltsc2019' }        # Windows Server 2019
+            default { 'ltsc2022' }
+          }
+          Write-Host "Host build $($cv.CurrentBuild) -> base image tag: $baseTag"
+          docker build `
+            --isolation=${{ inputs.isolation || 'process' }} `
+            --build-arg WINDOWS_RELEASE_VERSION=$baseTag `
+            --build-arg ROS_DISTRO=$env:ROS_DISTRO `
+            -f windows_docker_resources/Dockerfile `
+            -t $env:IMAGE_TAG `
+            .
+        # NOTE: build context is the repo root (.) so the Dockerfile can access
+        # the python scripts, exactly as the upstream comment requires.
+
+      # Run the batch job inside the container. Mount an output dir so results
+      # can be pulled back out to the runner and uploaded as artifacts.
+      - name: Run batch job in container
+        shell: powershell
+        run: |
+          New-Item -ItemType Directory -Force -Path "${{ github.workspace }}\container_out" | Out-Null
+          docker run --rm `
+            --isolation=${{ inputs.isolation || 'process' }} `
+            -e CI_ARGS="$env:CI_ARGS" `
+            -v "${{ github.workspace }}\container_out:C:\ci\ws" `
+            $env:IMAGE_TAG
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ros2-ci-docker-results
+          path: |
+            ${{ github.workspace }}\container_out\log\**
+            ${{ github.workspace }}\container_out\build\**\Testing\**
+            ${{ github.workspace }}\container_out\build\**\test_results\**
+            ${{ github.workspace }}\container_out\build\**\pytest.xml
+          if-no-files-found: warn

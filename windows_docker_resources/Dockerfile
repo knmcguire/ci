@@ -1,6 +1,11 @@
 # escape=`
 # This Dockerfile needs to be built from the parent directory (ros2/ci) so the build context
-# includes the python scripts
+# includes the python scripts.
+#
+# This is a patched copy of windows_docker_resources/Dockerfile with the RTI
+# Connext DDS steps removed (no license/source available). Everything else
+# mirrors the upstream image so a container-based GitHub Actions run can be
+# compared against the Jenkins (AWS) container-based nightly.
 
 # To find this value run in powershell:
 # $(Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion').ReleaseId
@@ -65,16 +70,9 @@ RUN pixi --color never --no-progress -q list
 # Ensure required colcon-ros-domain-id-coordinator version
 RUN pixi --color never --no-progress -q run "pip install 'colcon-ros-domain-id-coordinator >= 0.2.3'"
 
-# Setup environment variables needed for Connext
+# ROS distro env var (kept from upstream). Connext-specific env vars and the
+# RTI install steps are intentionally omitted in this patched image.
 ENV ROS_DISTRO=${ROS_DISTRO}
-ENV RTI_LICENSE_FILE C:\connext\rti_license.dat
-
-RUN IF NOT EXIST "C:\TEMP" mkdir C:\TEMP
-COPY rticonnextdds-src\ C:\TEMP\rticonnextdds-src
-COPY rticonnextdds-license\rti_license.dat C:\connext\rti_license.dat
-COPY rti_web_binaries_install_script.ps1 C:\TEMP\rti_web_binaries_install_script.ps1
-
-RUN powershell -ExecutionPolicy Bypass -Command "& C:\TEMP\rti_web_binaries_install_script.ps1 -RosDistro $env:ROS_DISTRO"
 
 WORKDIR C:\ci
 # Note that this *must* be in shell form, not exec form, so Docker on Windows appropriately substitutes %CI_ARGS%
