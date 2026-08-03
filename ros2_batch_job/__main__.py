@@ -578,6 +578,13 @@ def run(args, build_function, blacklisted_package_names=None):
             blacklisted_package_names += [
                 'rmw_fastrtps_shared_cpp',
             ]
+        if 'rmw_zenoh_cpp' in args.ignore_rmw:
+            blacklisted_package_names += [
+                'zenoh_cpp_vendor',
+                'rmw_zenoh_cpp',
+                'test_rmw_zenoh_cpp',
+                'zenoh_security_tools',
+            ]
 
         # Allow the batch job to push custom sourcing onto the run command
         job.setup_env()
