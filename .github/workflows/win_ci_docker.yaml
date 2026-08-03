@@ -148,9 +148,13 @@ jobs:
         shell: powershell
         run: |
           New-Item -ItemType Directory -Force -Path "${{ github.workspace }}\container_out" | Out-Null
+          # Pass CI_ARGS by NAME (not value) so Docker reads it directly from the
+          # environment. Passing -e CI_ARGS="$env:CI_ARGS" re-parses the value
+          # through the shell and breaks on the embedded quotes/spaces in
+          # -G "Visual Studio 17 2022" (produces: invalid reference format).
           docker run --rm `
             --isolation=${{ inputs.isolation || 'process' }} `
-            -e CI_ARGS="$env:CI_ARGS" `
+            --env CI_ARGS `
             -v "${{ github.workspace }}\container_out:C:\ci\ws" `
             $env:IMAGE_TAG
 
