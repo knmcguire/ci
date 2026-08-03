@@ -28,7 +28,7 @@ on:
           --cmake-build-type Release
           --visual-studio-version 2022
           --build-args --event-handlers console_cohesion+ console_package_list+
-          --cmake-args -G "Visual Studio 17 2022" -A x64 -DINSTALL_EXAMPLES=OFF -DSECURITY=ON -DAPPEND_PROJECT_NAME_TO_INCLUDEDIR=ON
+          --cmake-args -DINSTALL_EXAMPLES=OFF -DSECURITY=ON -DAPPEND_PROJECT_NAME_TO_INCLUDEDIR=ON
           --test-args --event-handlers console_cohesion+
           --retest-until-pass 2 --ctest-args -LE xfail --pytest-args -m "not xfail"
         type: string
@@ -49,7 +49,7 @@ jobs:
       # D:\a\ci\ci on hosted Windows runners). All colcon output lands here.
       WS_PATH: ${{ github.workspace }}\ws
       # Mirrors the CMD in the Dockerfile. Overridable via workflow_dispatch.
-      CI_ARGS: ${{ inputs.ci_args || '--force-ansi-color --ignore-rmw rmw_fastrtps_dynamic_cpp rmw_connextdds --repo-file-url https://raw.githubusercontent.com/ros2/ros2/rolling/ros2.repos --colcon-mixin-url https://raw.githubusercontent.com/colcon/colcon-mixin-repository/master/index.yaml --cmake-build-type Release --visual-studio-version 2022 --build-args --event-handlers console_cohesion+ console_package_list+ --cmake-args -G "Visual Studio 17 2022" -A x64 -DINSTALL_EXAMPLES=OFF -DSECURITY=ON -DAPPEND_PROJECT_NAME_TO_INCLUDEDIR=ON --test-args --event-handlers console_cohesion+ --retest-until-pass 2 --ctest-args -LE xfail --pytest-args -m "not xfail"' }}
+      CI_ARGS: ${{ inputs.ci_args || '--force-ansi-color --ignore-rmw rmw_fastrtps_dynamic_cpp rmw_connextdds --repo-file-url https://raw.githubusercontent.com/ros2/ros2/rolling/ros2.repos --colcon-mixin-url https://raw.githubusercontent.com/colcon/colcon-mixin-repository/master/index.yaml --cmake-build-type Release --visual-studio-version 2022 --build-args --event-handlers console_cohesion+ console_package_list+ --cmake-args -DINSTALL_EXAMPLES=OFF -DSECURITY=ON -DAPPEND_PROJECT_NAME_TO_INCLUDEDIR=ON --test-args --event-handlers console_cohesion+ --retest-until-pass 2 --ctest-args -LE xfail --pytest-args -m "not xfail"' }}
 
     steps:
       - name: Checkout ci repository
@@ -107,7 +107,6 @@ jobs:
           $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
           & $vswhere -products * -version "[17.0,18.0)" -property installationPath
 
-
       # Dockerfile: fetch a pinned pixi, verify checksum, extract, add to PATH.
       - name: Install pixi (pinned + checksum verified)
         shell: powershell
@@ -152,11 +151,35 @@ jobs:
       # intentionally omitted. Builds must pass --ignore-rmw rmw_connextdds.
 
       # Dockerfile CMD: run the batch job.
+      #
+      # colcon_cmake requires the MSVC environment (VisualStudioVersion et al.)
+      # to be present in the shell. run_ros2_batch.py generates an env.bat that
+      # calls vcvarsall.bat by a hardcoded path, but that path is brittle (it
+      # assumes the BuildTools edition under "Program Files (x86)"). To be
+      # robust, we locate the real VS 2022 install with vswhere and source its
+      # vcvars64.bat ourselves so the batch job inherits a fully configured
+      # environment. If VisualStudioVersion still isn't set afterwards, we fail
+      # early with a clear message instead of deep inside colcon.
       - name: Run ROS 2 batch job
         shell: cmd
-        run: >-
-          pixi run --manifest-path C:\pixi_ws\pixi.toml --frozen
-          python run_ros2_batch.py %CI_ARGS%
+        run: |
+          for /f "usebackq tokens=*" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -products * -version "[17.0^,18.0^)" -latest -property installationPath`) do set "VSROOT=%%i"
+          if not defined VSROOT (
+            echo ERROR: No Visual Studio 2022 ^(17.x^) instance found by vswhere.
+            exit /b 1
+          )
+          echo Using Visual Studio at: %VSROOT%
+          call "%VSROOT%\VC\Auxiliary\Build\vcvars64.bat"
+          if errorlevel 1 (
+            echo ERROR: vcvars64.bat failed.
+            exit /b 1
+          )
+          if not defined VisualStudioVersion (
+            echo ERROR: VisualStudioVersion is still not set after sourcing vcvars.
+            exit /b 1
+          )
+          echo VisualStudioVersion=%VisualStudioVersion%
+          pixi run --manifest-path C:\pixi_ws\pixi.toml --frozen python run_ros2_batch.py %CI_ARGS%
 
       # Diagnostic: show what actually landed on disk under the workspace so
       # that empty/missing artifacts can be traced to a path mismatch or an
