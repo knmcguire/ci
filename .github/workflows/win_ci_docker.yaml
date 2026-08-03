@@ -57,6 +57,45 @@ jobs:
       - name: Checkout ci repository
         uses: actions/checkout@v4
 
+      # The Docker daemon is not running by default on hosted Windows runners,
+      # and it must be in *Windows containers* mode to build a windows/server
+      # image. Start the service and confirm the server responds in Windows mode.
+      - name: Start Docker engine (Windows containers)
+        shell: powershell
+        run: |
+          Write-Host "Services matching docker:"
+          Get-Service | Where-Object { $_.Name -like '*docker*' } | Format-Table -AutoSize | Out-String | Write-Host
+          # Start the Windows docker service if present.
+          $svc = Get-Service -Name 'docker' -ErrorAction SilentlyContinue
+          if (-not $svc) {
+            Write-Error "No 'docker' Windows service found on this runner. This runner image may not support Windows containers."
+            exit 1
+          }
+          if ($svc.Status -ne 'Running') {
+            Write-Host "Starting docker service..."
+            Start-Service docker
+            Start-Sleep -Seconds 5
+          }
+          # Wait for the daemon to accept connections.
+          $ok = $false
+          for ($i = 0; $i -lt 12; $i++) {
+            docker version --format '{{.Server.Os}}' 2>$null
+            if ($LASTEXITCODE -eq 0) { $ok = $true; break }
+            Write-Host "Waiting for docker daemon... ($i)"
+            Start-Sleep -Seconds 5
+          }
+          if (-not $ok) {
+            Write-Error "Docker daemon did not become ready."
+            exit 1
+          }
+          $serverOs = docker version --format '{{.Server.Os}}'
+          Write-Host "Docker server OS: $serverOs"
+          if ($serverOs -ne 'windows') {
+            Write-Error "Docker is in '$serverOs' container mode; this image needs Windows containers. Switch the daemon to Windows containers."
+            exit 1
+          }
+          docker info
+
       # Docker is preinstalled on the windows-2022 runner. Record host + docker
       # info: the host OS build determines which base image tag is compatible
       # and whether Hyper-V isolation is required.
