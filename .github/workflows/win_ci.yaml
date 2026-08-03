@@ -22,16 +22,15 @@ on:
         description: Arguments passed to run_ros2_batch.py
         default: >-
           --force-ansi-color
-          --ignore-rmw rmw_connextdds
+          --ignore-rmw rmw_fastrtps_dynamic_cpp rmw_connextdds
           --repo-file-url https://raw.githubusercontent.com/ros2/ros2/rolling/ros2.repos
           --colcon-mixin-url https://raw.githubusercontent.com/colcon/colcon-mixin-repository/master/index.yaml
+          --cmake-build-type Release
           --visual-studio-version 2022
           --build-args --event-handlers console_cohesion+ console_package_list+
-          --cmake-args -G "Visual Studio 17 2022" -A x64 -DINSTALL_EXAMPLES=OFF -DSECURITY=ON -DAPPEND_PROJECT_NAME_TO_INCLUDEDIR=ON
-          --packages-up-to rclcpp
-          --test-args --event-handlers console_direct+ --executor sequential
+          --cmake-args -DINSTALL_EXAMPLES=OFF -DSECURITY=ON -DAPPEND_PROJECT_NAME_TO_INCLUDEDIR=ON
+          --test-args --event-handlers console_cohesion+
           --retest-until-pass 2 --ctest-args -LE xfail --pytest-args -m "not xfail"
-          --packages-up-to rclcpp
         type: string
 
 env:
@@ -50,7 +49,7 @@ jobs:
       # D:\a\ci\ci on hosted Windows runners). All colcon output lands here.
       WS_PATH: ${{ github.workspace }}\ws
       # Mirrors the CMD in the Dockerfile. Overridable via workflow_dispatch.
-      CI_ARGS: ${{ inputs.ci_args || '--force-ansi-color --ignore-rmw rmw_connextdds --repo-file-url https://raw.githubusercontent.com/ros2/ros2/rolling/ros2.repos --colcon-mixin-url https://raw.githubusercontent.com/colcon/colcon-mixin-repository/master/index.yaml --visual-studio-version 2022 --build-args --event-handlers console_cohesion+ console_package_list+ --cmake-args -G "Visual Studio 17 2022" -A x64 -DINSTALL_EXAMPLES=OFF -DSECURITY=ON -DAPPEND_PROJECT_NAME_TO_INCLUDEDIR=ON --packages-up-to rclcpp --test-args --event-handlers console_direct+ --executor sequential --retest-until-pass 2 --ctest-args -LE xfail --pytest-args -m "not xfail" --packages-up-to rclcpp' }}
+      CI_ARGS: ${{ inputs.ci_args || '--force-ansi-color --ignore-rmw rmw_fastrtps_dynamic_cpp rmw_connextdds --repo-file-url https://raw.githubusercontent.com/ros2/ros2/rolling/ros2.repos --colcon-mixin-url https://raw.githubusercontent.com/colcon/colcon-mixin-repository/master/index.yaml --cmake-build-type Release --visual-studio-version 2022 --build-args --event-handlers console_cohesion+ console_package_list+ --cmake-args -DINSTALL_EXAMPLES=OFF -DSECURITY=ON -DAPPEND_PROJECT_NAME_TO_INCLUDEDIR=ON --test-args --event-handlers console_cohesion+ --retest-until-pass 2 --ctest-args -LE xfail --pytest-args -m "not xfail"' }}
 
     steps:
       - name: Checkout ci repository
