@@ -150,26 +150,32 @@ jobs:
       # NOTE: Connext (rti_web_binaries_install_script.ps1, license, src) is
       # intentionally omitted. Builds must pass --ignore-rmw rmw_connextdds.
 
+      # Locate the VS 2022 install with vswhere (PowerShell handles the spaced
+      # install path cleanly) and export it for the batch step to source.
+      - name: Locate Visual Studio 2022
+        shell: powershell
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          if (-not (Test-Path $vswhere)) { Write-Error "vswhere.exe not found"; exit 1 }
+          $vsRoot = & $vswhere -products * -version '[17.0,18.0)' -latest -property installationPath
+          if (-not $vsRoot) { Write-Error "No Visual Studio 2022 (17.x) instance found"; exit 1 }
+          $vcvars = Join-Path $vsRoot 'VC\Auxiliary\Build\vcvars64.bat'
+          if (-not (Test-Path $vcvars)) { Write-Error "vcvars64.bat not found under $vsRoot"; exit 1 }
+          Write-Host "Found Visual Studio at: $vsRoot"
+          "VCVARS64=$vcvars" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
       # Dockerfile CMD: run the batch job.
       #
       # colcon_cmake requires the MSVC environment (VisualStudioVersion et al.)
       # to be present in the shell. run_ros2_batch.py generates an env.bat that
-      # calls vcvarsall.bat by a hardcoded path, but that path is brittle (it
-      # assumes the BuildTools edition under "Program Files (x86)"). To be
-      # robust, we locate the real VS 2022 install with vswhere and source its
-      # vcvars64.bat ourselves so the batch job inherits a fully configured
-      # environment. If VisualStudioVersion still isn't set afterwards, we fail
-      # early with a clear message instead of deep inside colcon.
+      # calls vcvarsall.bat by a hardcoded path, but to be robust we source the
+      # real vcvars64.bat (located in the previous step) ourselves so the batch
+      # job inherits a fully configured environment. We fail early with a clear
+      # message if VisualStudioVersion isn't set, rather than deep inside colcon.
       - name: Run ROS 2 batch job
         shell: cmd
         run: |
-          for /f "usebackq tokens=*" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -products * -version "[17.0^,18.0^)" -latest -property installationPath`) do set "VSROOT=%%i"
-          if not defined VSROOT (
-            echo ERROR: No Visual Studio 2022 ^(17.x^) instance found by vswhere.
-            exit /b 1
-          )
-          echo Using Visual Studio at: %VSROOT%
-          call "%VSROOT%\VC\Auxiliary\Build\vcvars64.bat"
+          call "%VCVARS64%"
           if errorlevel 1 (
             echo ERROR: vcvars64.bat failed.
             exit /b 1
