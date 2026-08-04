@@ -250,11 +250,14 @@ jobs:
           rem Point cargo (zenoh's Rust vendor build) at MSVC's link.exe via a
           rem space-free junction path (C:/msvcbin/link.exe). Bare 'link.exe' is
           rem unsafe because the pixi env ships a GNU coreutils link.exe that wins
-          rem the PATH lookup (error: "link: extra operand"). A full spaced path is
-          rem unsafe too (truncates at "C:\Program"); the junction avoids both.
+          rem the PATH lookup (error: "link: extra operand").
           set "CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER=%MSVC_LINK%"
-          rem cl.exe has no coreutils collision, so bare name is fine for it.
-          set "CMAKE_INJECT=-G Ninja -DCMAKE_C_COMPILER=cl.exe -DCMAKE_CXX_COMPILER=cl.exe -DCMAKE_OBJECT_PATH_MAX=1024"
+          rem Point CMAKE at cl.exe via the SAME space-free junction. A bare name
+          rem does NOT work: CMake resolves it via find_program to a full path,
+          rem which then truncates at the "Program Files" space (C:\Program\VC\...)
+          rem and produces fatal error C1083. The junction path has no spaces so
+          rem the resolved path stays valid in build.ninja.
+          set "CMAKE_INJECT=-G Ninja -DCMAKE_C_COMPILER=C:/msvcbin/cl.exe -DCMAKE_CXX_COMPILER=C:/msvcbin/cl.exe -DCMAKE_OBJECT_PATH_MAX=1024"
           call set "CI_ARGS_EXPANDED=%%CI_ARGS:-G Ninja=%CMAKE_INJECT%%%"
           echo Expanded CI_ARGS:
           echo %CI_ARGS_EXPANDED%
