@@ -203,8 +203,27 @@ jobs:
           # 8.3 short-path resolution is unreliable here (short-name generation is
           # disabled on C:\Program Files (x86) on this runner, so only deep
           # subdirs shorten, leaving a truncated "C:\Program\..." path). Instead
-          # the Run step passes bare cl.exe/link.exe and relies on the vcvars
-          # PATH, exactly as MSBuild does.
+          # the Run step passes bare cl.exe and relies on the vcvars PATH, as
+          # MSBuild does.
+          #
+          # For the zenoh Rust build, bare 'link.exe' is NOT safe: the pixi
+          # environment ships a GNU coreutils link.exe that wins the bare-name
+          # PATH lookup (cl.exe has no such collision). We therefore need MSVC's
+          # link.exe by full path -- but the path contains spaces and 8.3 is
+          # disabled. Create a space-free NTFS junction to the MSVC Hostx64\x64
+          # bin directory so cargo can be pointed at a spaces-free linker path.
+          $clHostDir = Get-ChildItem -Path (Join-Path $vsRoot 'VC\Tools\MSVC') -Recurse -Filter cl.exe -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -match '\\Hostx64\\x64\\cl.exe$' } |
+            Select-Object -First 1 | ForEach-Object { $_.DirectoryName }
+          if (-not $clHostDir) { Write-Error "Could not find Hostx64\x64 bin dir under $vsRoot"; exit 1 }
+          $junction = 'C:\msvcbin'
+          if (Test-Path $junction) { cmd /c rmdir "$junction" 2>$null }
+          New-Item -ItemType Junction -Path $junction -Target $clHostDir | Out-Null
+          $linkViaJunction = 'C:/msvcbin/link.exe'
+          if (-not (Test-Path $linkViaJunction)) { Write-Error "link.exe not reachable via junction $junction"; exit 1 }
+          Write-Host "MSVC bin dir : $clHostDir"
+          Write-Host "linker (junction): $linkViaJunction"
+          "MSVC_LINK=$linkViaJunction" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       # Dockerfile CMD: run the batch job.
       #
@@ -227,13 +246,14 @@ jobs:
             exit /b 1
           )
           echo VisualStudioVersion=%VisualStudioVersion%
-          rem Point cargo (zenoh's Rust vendor build) at the MSVC linker so it does
-          rem not pick up the pixi coreutils link.exe from PATH. cl.exe/link.exe are
-          rem on PATH after vcvars; using the bare names (not full paths) avoids the
-          rem "Program Files" space being truncated to C:\Program (fatal C1083).
-          rem This mirrors how MSBuild resolves the toolchain (by name, via PATH).
-          set "CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER=link.exe"
-          rem Inject bare-name compiler override into the existing --cmake-args group.
+          echo MSVC_LINK=%MSVC_LINK%
+          rem Point cargo (zenoh's Rust vendor build) at MSVC's link.exe via a
+          rem space-free junction path (C:/msvcbin/link.exe). Bare 'link.exe' is
+          rem unsafe because the pixi env ships a GNU coreutils link.exe that wins
+          rem the PATH lookup (error: "link: extra operand"). A full spaced path is
+          rem unsafe too (truncates at "C:\Program"); the junction avoids both.
+          set "CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER=%MSVC_LINK%"
+          rem cl.exe has no coreutils collision, so bare name is fine for it.
           set "CMAKE_INJECT=-G Ninja -DCMAKE_C_COMPILER=cl.exe -DCMAKE_CXX_COMPILER=cl.exe -DCMAKE_OBJECT_PATH_MAX=1024"
           call set "CI_ARGS_EXPANDED=%%CI_ARGS:-G Ninja=%CMAKE_INJECT%%%"
           echo Expanded CI_ARGS:
