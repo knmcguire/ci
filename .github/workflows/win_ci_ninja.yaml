@@ -199,40 +199,12 @@ jobs:
           if (-not (Test-Path $vcvars)) { Write-Error "vcvars64.bat not found under $vsRoot"; exit 1 }
           Write-Host "Found Visual Studio at: $vsRoot"
           "VCVARS64=$vcvars" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-
-          # --- Ninja space-in-path workaround ---
-          # Under the Ninja generator, CMake bakes the detected compiler path
-          # into build.ninja. On this pixi/vcvars setup the "Program Files (x86)"
-          # space gets word-split, producing a truncated "C:\Program\VC\..."
-          # cl.exe path and fatal error C1083. To avoid every quoting layer, we
-          # resolve the SHORT (8.3) path to cl.exe (no spaces) and pass it to
-          # CMake via -DCMAKE_C(XX)_COMPILER. Find cl.exe under the VS tools dir.
-          $clHost = Get-ChildItem -Path (Join-Path $vsRoot 'VC\Tools\MSVC') -Recurse -Filter cl.exe -ErrorAction SilentlyContinue |
-            Where-Object { $_.FullName -match '\\Hostx64\\x64\\cl.exe$' } |
-            Select-Object -First 1 -ExpandProperty FullName
-          if (-not $clHost) { Write-Error "Could not find Hostx64\x64\cl.exe under $vsRoot"; exit 1 }
-          # Resolve to 8.3 short path via the Scripting.FileSystemObject.
-          $fso = New-Object -ComObject Scripting.FileSystemObject
-          $clShort = $fso.GetFile($clHost).ShortPath
-          # CMake wants forward slashes; short path has none of the problem chars.
-          $clShortFwd = $clShort -replace '\\','/'
-          Write-Host "cl.exe (long) : $clHost"
-          Write-Host "cl.exe (8.3)  : $clShortFwd"
-          "CL_SHORT=$clShortFwd" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-
-          # The Rust/cargo build of zenoh_cpp_vendor resolves 'link' from PATH and
-          # can pick up the pixi environment's GNU coreutils link.exe instead of
-          # MSVC's linker (error: "/usr/bin/link: extra operand"). Resolve the
-          # MSVC link.exe next to cl.exe and export its 8.3 path so we can point
-          # cargo at it explicitly via CARGO_TARGET_*_LINKER.
-          $linkHost = Join-Path (Split-Path $clHost -Parent) 'link.exe'
-          if (Test-Path $linkHost) {
-            $linkShort = ($fso.GetFile($linkHost).ShortPath) -replace '\\','/'
-            Write-Host "link.exe (8.3): $linkShort"
-            "LINK_SHORT=$linkShort" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          } else {
-            Write-Host "WARNING: MSVC link.exe not found next to cl.exe; zenoh Rust build may fail."
-          }
+          # Note: we intentionally do NOT pass a full compiler path to CMake.
+          # 8.3 short-path resolution is unreliable here (short-name generation is
+          # disabled on C:\Program Files (x86) on this runner, so only deep
+          # subdirs shorten, leaving a truncated "C:\Program\..." path). Instead
+          # the Run step passes bare cl.exe/link.exe and relies on the vcvars
+          # PATH, exactly as MSBuild does.
 
       # Dockerfile CMD: run the batch job.
       #
@@ -255,19 +227,14 @@ jobs:
             exit /b 1
           )
           echo VisualStudioVersion=%VisualStudioVersion%
-          echo CL_SHORT=%CL_SHORT%
-          echo LINK_SHORT=%LINK_SHORT%
-          rem Point cargo (zenoh's Rust vendor build) at the MSVC linker by its
-          rem 8.3 path, so it does not pick up the pixi coreutils link.exe from
-          rem PATH. cargo reads CARGO_TARGET_<triple>_LINKER.
-          if defined LINK_SHORT set "CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER=%LINK_SHORT%"
-          rem Insert the explicit short-path compiler override into the existing
-          rem --cmake-args group of CI_ARGS (a second --cmake-args would be parsed
-          rem into the wrong argument group by run_ros2_batch.py). The short (8.3)
-          rem cl.exe path is space-free, so the Ninja generator records a valid
-          rem compiler path in build.ninja instead of a truncated "C:\Program\..."
-          rem path (fatal error C1083). %CL_SHORT% is set by the Locate VS step.
-          set "CMAKE_INJECT=-G Ninja -DCMAKE_C_COMPILER=%CL_SHORT% -DCMAKE_CXX_COMPILER=%CL_SHORT%"
+          rem Point cargo (zenoh's Rust vendor build) at the MSVC linker so it does
+          rem not pick up the pixi coreutils link.exe from PATH. cl.exe/link.exe are
+          rem on PATH after vcvars; using the bare names (not full paths) avoids the
+          rem "Program Files" space being truncated to C:\Program (fatal C1083).
+          rem This mirrors how MSBuild resolves the toolchain (by name, via PATH).
+          set "CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER=link.exe"
+          rem Inject bare-name compiler override into the existing --cmake-args group.
+          set "CMAKE_INJECT=-G Ninja -DCMAKE_C_COMPILER=cl.exe -DCMAKE_CXX_COMPILER=cl.exe -DCMAKE_OBJECT_PATH_MAX=1024"
           call set "CI_ARGS_EXPANDED=%%CI_ARGS:-G Ninja=%CMAKE_INJECT%%%"
           echo Expanded CI_ARGS:
           echo %CI_ARGS_EXPANDED%
