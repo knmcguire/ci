@@ -24,7 +24,7 @@ on:
         description: Arguments passed to run_ros2_batch.py
         default: >-
           --force-ansi-color
-          --ignore-rmw rmw_fastrtps_dynamic_cpp rmw_connextdds rmw_zenoh_cpp
+          --ignore-rmw rmw_fastrtps_dynamic_cpp rmw_connextdds
           --repo-file-url https://raw.githubusercontent.com/ros2/ros2/rolling/ros2.repos
           --colcon-mixin-url https://raw.githubusercontent.com/colcon/colcon-mixin-repository/master/index.yaml
           --cmake-build-type Release
@@ -51,7 +51,7 @@ jobs:
       # D:\a\ci\ci on hosted Windows runners). All colcon output lands here.
       WS_PATH: ${{ github.workspace }}\ws
       # Mirrors the CMD in the Dockerfile. Overridable via workflow_dispatch.
-      CI_ARGS: ${{ inputs.ci_args || '--force-ansi-color --ignore-rmw rmw_fastrtps_dynamic_cpp rmw_connextdds rmw_zenoh_cpp --repo-file-url https://raw.githubusercontent.com/ros2/ros2/rolling/ros2.repos --colcon-mixin-url https://raw.githubusercontent.com/colcon/colcon-mixin-repository/master/index.yaml --cmake-build-type Release --visual-studio-version 2022 --build-args --event-handlers console_cohesion+ console_package_list+ --cmake-args -G Ninja -DCMAKE_BUILD_TYPE=Release -DINSTALL_EXAMPLES=OFF -DSECURITY=ON -DAPPEND_PROJECT_NAME_TO_INCLUDEDIR=ON --test-args --event-handlers console_cohesion+ --retest-until-pass 2 --ctest-args -LE xfail --pytest-args -m "not xfail"' }}
+      CI_ARGS: ${{ inputs.ci_args || '--force-ansi-color --ignore-rmw rmw_fastrtps_dynamic_cpp rmw_connextdds --repo-file-url https://raw.githubusercontent.com/ros2/ros2/rolling/ros2.repos --colcon-mixin-url https://raw.githubusercontent.com/colcon/colcon-mixin-repository/master/index.yaml --cmake-build-type Release --visual-studio-version 2022 --build-args --event-handlers console_cohesion+ console_package_list+ --cmake-args -G Ninja -DCMAKE_BUILD_TYPE=Release -DINSTALL_EXAMPLES=OFF -DSECURITY=ON -DAPPEND_PROJECT_NAME_TO_INCLUDEDIR=ON --test-args --event-handlers console_cohesion+ --retest-until-pass 2 --ctest-args -LE xfail --pytest-args -m "not xfail"' }}
 
     steps:
       - name: Checkout ci repository
@@ -200,6 +200,40 @@ jobs:
           Write-Host "Found Visual Studio at: $vsRoot"
           "VCVARS64=$vcvars" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
+          # --- Ninja space-in-path workaround ---
+          # Under the Ninja generator, CMake bakes the detected compiler path
+          # into build.ninja. On this pixi/vcvars setup the "Program Files (x86)"
+          # space gets word-split, producing a truncated "C:\Program\VC\..."
+          # cl.exe path and fatal error C1083. To avoid every quoting layer, we
+          # resolve the SHORT (8.3) path to cl.exe (no spaces) and pass it to
+          # CMake via -DCMAKE_C(XX)_COMPILER. Find cl.exe under the VS tools dir.
+          $clHost = Get-ChildItem -Path (Join-Path $vsRoot 'VC\Tools\MSVC') -Recurse -Filter cl.exe -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -match '\\Hostx64\\x64\\cl.exe$' } |
+            Select-Object -First 1 -ExpandProperty FullName
+          if (-not $clHost) { Write-Error "Could not find Hostx64\x64\cl.exe under $vsRoot"; exit 1 }
+          # Resolve to 8.3 short path via the Scripting.FileSystemObject.
+          $fso = New-Object -ComObject Scripting.FileSystemObject
+          $clShort = $fso.GetFile($clHost).ShortPath
+          # CMake wants forward slashes; short path has none of the problem chars.
+          $clShortFwd = $clShort -replace '\\','/'
+          Write-Host "cl.exe (long) : $clHost"
+          Write-Host "cl.exe (8.3)  : $clShortFwd"
+          "CL_SHORT=$clShortFwd" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+          # The Rust/cargo build of zenoh_cpp_vendor resolves 'link' from PATH and
+          # can pick up the pixi environment's GNU coreutils link.exe instead of
+          # MSVC's linker (error: "/usr/bin/link: extra operand"). Resolve the
+          # MSVC link.exe next to cl.exe and export its 8.3 path so we can point
+          # cargo at it explicitly via CARGO_TARGET_*_LINKER.
+          $linkHost = Join-Path (Split-Path $clHost -Parent) 'link.exe'
+          if (Test-Path $linkHost) {
+            $linkShort = ($fso.GetFile($linkHost).ShortPath) -replace '\\','/'
+            Write-Host "link.exe (8.3): $linkShort"
+            "LINK_SHORT=$linkShort" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          } else {
+            Write-Host "WARNING: MSVC link.exe not found next to cl.exe; zenoh Rust build may fail."
+          }
+
       # Dockerfile CMD: run the batch job.
       #
       # colcon_cmake requires the MSVC environment (VisualStudioVersion et al.)
@@ -221,7 +255,23 @@ jobs:
             exit /b 1
           )
           echo VisualStudioVersion=%VisualStudioVersion%
-          pixi run --manifest-path C:\pixi_ws\pixi.toml --frozen python run_ros2_batch.py %CI_ARGS%
+          echo CL_SHORT=%CL_SHORT%
+          echo LINK_SHORT=%LINK_SHORT%
+          rem Point cargo (zenoh's Rust vendor build) at the MSVC linker by its
+          rem 8.3 path, so it does not pick up the pixi coreutils link.exe from
+          rem PATH. cargo reads CARGO_TARGET_<triple>_LINKER.
+          if defined LINK_SHORT set "CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER=%LINK_SHORT%"
+          rem Insert the explicit short-path compiler override into the existing
+          rem --cmake-args group of CI_ARGS (a second --cmake-args would be parsed
+          rem into the wrong argument group by run_ros2_batch.py). The short (8.3)
+          rem cl.exe path is space-free, so the Ninja generator records a valid
+          rem compiler path in build.ninja instead of a truncated "C:\Program\..."
+          rem path (fatal error C1083). %CL_SHORT% is set by the Locate VS step.
+          set "CMAKE_INJECT=-G Ninja -DCMAKE_C_COMPILER=%CL_SHORT% -DCMAKE_CXX_COMPILER=%CL_SHORT%"
+          call set "CI_ARGS_EXPANDED=%%CI_ARGS:-G Ninja=%CMAKE_INJECT%%%"
+          echo Expanded CI_ARGS:
+          echo %CI_ARGS_EXPANDED%
+          pixi run --manifest-path C:\pixi_ws\pixi.toml --frozen python run_ros2_batch.py %CI_ARGS_EXPANDED%
 
       # Diagnostic: show what actually landed on disk under the workspace so
       # that empty/missing artifacts can be traced to a path mismatch or an
