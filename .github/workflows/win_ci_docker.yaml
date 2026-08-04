@@ -50,6 +50,8 @@ jobs:
     runs-on: windows-2022
     timeout-minutes: 350
     env:
+      # The batch script requires ROS_DOMAIN_ID; forwarded into the container below.
+      ROS_DOMAIN_ID: 1
       # Mirrors the CMD's %CI_ARGS%. Connext ignored (not installed in image).
       CI_ARGS: ${{ inputs.ci_args || '--force-ansi-color --ignore-rmw rmw_fastrtps_dynamic_cpp rmw_connextdds --repo-file-url https://raw.githubusercontent.com/ros2/ros2/rolling/ros2.repos --colcon-mixin-url https://raw.githubusercontent.com/colcon/colcon-mixin-repository/master/index.yaml --cmake-build-type Release --visual-studio-version 2022 --build-args --event-handlers console_cohesion+ console_package_list+ --cmake-args -G "Visual Studio 17 2022" -A x64 -DINSTALL_EXAMPLES=OFF -DSECURITY=ON -DAPPEND_PROJECT_NAME_TO_INCLUDEDIR=ON --test-args --event-handlers console_cohesion+ --retest-until-pass 2 --ctest-args -LE xfail --pytest-args -m "not xfail"' }}
 
@@ -158,6 +160,7 @@ jobs:
           docker run --name ros2ci `
             --isolation=${{ inputs.isolation || 'process' }} `
             --env CI_ARGS `
+            --env ROS_DOMAIN_ID `
             -v "${{ github.workspace }}:C:\ci" `
             $env:IMAGE_TAG
           $rc = $LASTEXITCODE
