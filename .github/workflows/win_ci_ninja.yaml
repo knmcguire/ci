@@ -266,7 +266,13 @@ jobs:
           rem which then truncates at the "Program Files" space (C:\Program\VC\...)
           rem and produces fatal error C1083. The junction path has no spaces so
           rem the resolved path stays valid in build.ninja.
-          set "CMAKE_INJECT=-G Ninja -DCMAKE_C_COMPILER=C:/msvcbin/cl.exe -DCMAKE_CXX_COMPILER=C:/msvcbin/cl.exe -DCMAKE_OBJECT_PATH_MAX=1024"
+          rem CMAKE_OBJECT_PATH_MAX: when a computed object-file path would exceed
+          rem this many chars, CMake shortens it (hashes the deep dir). Setting it
+          rem HIGH (1024) disables that shortening; we want it LOW so CMake shortens
+          rem the pathological rosbag2_performance_benchmarking_msgs object paths
+          rem that otherwise blow the Windows path limit (fatal C1083 with empty
+          rem filename). 200 forces aggressive shortening while staying workable.
+          set "CMAKE_INJECT=-G Ninja -DCMAKE_C_COMPILER=C:/msvcbin/cl.exe -DCMAKE_CXX_COMPILER=C:/msvcbin/cl.exe -DCMAKE_OBJECT_PATH_MAX=200"
           call set "CI_ARGS_EXPANDED=%%CI_ARGS:-G Ninja=%CMAKE_INJECT%%%"
           echo Expanded CI_ARGS:
           echo %CI_ARGS_EXPANDED%
