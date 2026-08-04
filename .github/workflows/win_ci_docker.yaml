@@ -180,28 +180,21 @@ jobs:
             Write-Host "Container 'ros2ci' not found; nothing to extract."
             exit 0
           }
-          # Discover where the batch job actually wrote its workspace. Inside the
-          # container WORKDIR is C:\ci, so the workspace is created at C:\ci\ws,
-          # but confirm rather than assume. List candidate dirs.
-          Write-Host "== C:\ci in container =="
-          docker exec ros2ci cmd /c "dir C:\ci" 2>&1 | Write-Host
-          Write-Host "== C:\ci\ws in container =="
-          docker exec ros2ci cmd /c "dir C:\ci\ws" 2>&1 | Write-Host
-
-          # Copy each path only if it exists in the container, so a missing path
-          # does not fail the job. docker cp writes to stderr on failure; we probe
-          # first with 'docker exec ... if exist'.
-          function Copy-IfExists($srcInContainer, $dst) {
-            $check = docker exec ros2ci cmd /c "if exist `"$srcInContainer`" (echo YES) else (echo NO)"
-            if ($check -match 'YES') {
-              Write-Host "Copying $srcInContainer -> $dst"
-              docker cp "ros2ci:$srcInContainer" "$dst"
-            } else {
-              Write-Host "Not present in container: $srcInContainer"
+          # The container has EXITED by now (batch job finished, container stopped).
+          # docker cp works on stopped containers; docker exec does NOT (it needs a
+          # running container). The previous version probed with docker exec, which
+          # always failed here ("container is not running") and skipped every copy.
+          # The build writes to C:\ci\ws\build and C:\ci\ws\log (confirmed from
+          # the batch log), so copy those directly and tolerate any missing path.
+          function Copy-Path($srcInContainer, $dst) {
+            Write-Host "Copying $srcInContainer -> $dst"
+            docker cp "ros2ci:$srcInContainer" "$dst"
+            if ($LASTEXITCODE -ne 0) {
+              Write-Host "  (path not present or copy failed; continuing)"
             }
           }
-          Copy-IfExists "C:\ci\ws\log"   "${{ github.workspace }}\container_out\log"
-          Copy-IfExists "C:\ci\ws\build" "${{ github.workspace }}\container_out\build"
+          Copy-Path "C:\ci\ws\log"   "${{ github.workspace }}\container_out\log"
+          Copy-Path "C:\ci\ws\build" "${{ github.workspace }}\container_out\build"
 
           docker rm ros2ci | Out-Null
           exit 0
