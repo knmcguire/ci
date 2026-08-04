@@ -247,6 +247,15 @@ jobs:
           )
           echo VisualStudioVersion=%VisualStudioVersion%
           echo MSVC_LINK=%MSVC_LINK%
+          rem The real cause of "C1083: Cannot open compiler generated file: ''"
+          rem is PATH LENGTH, not the "Program Files" space: the build root
+          rem D:\a\ros2-ci\ros2-ci\ws\build\...\*.obj exceeds Windows limits under
+          rem Ninja (MSBuild tolerates it; Ninja does not). Shorten every path by
+          rem running the batch job from a short junction (C:\w -> the checkout),
+          rem so the workspace becomes C:\w\ws instead of D:\a\ros2-ci\ros2-ci\ws.
+          if exist C:\w rmdir C:\w
+          mklink /J C:\w "%GITHUB_WORKSPACE%" || (echo ERROR: could not create C:\w junction & exit /b 1)
+          cd /d C:\w
           rem Point cargo (zenoh's Rust vendor build) at MSVC's link.exe via a
           rem space-free junction path (C:/msvcbin/link.exe). Bare 'link.exe' is
           rem unsafe because the pixi env ships a GNU coreutils link.exe that wins
