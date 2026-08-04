@@ -147,16 +147,40 @@ jobs:
       - name: Run batch job in container
         shell: powershell
         run: |
-          New-Item -ItemType Directory -Force -Path "${{ github.workspace }}\container_out" | Out-Null
-          # Pass CI_ARGS by NAME (not value) so Docker reads it directly from the
-          # environment. Passing -e CI_ARGS="$env:CI_ARGS" re-parses the value
-          # through the shell and breaks on the embedded quotes/spaces in
-          # -G "Visual Studio 17 2022" (produces: invalid reference format).
-          docker run --rm `
+          # The image does not contain the ci repo's python scripts (the
+          # Dockerfile only ADDs pixi.toml). Mount the checkout at C:\ci so
+          # run_ros2_batch.py is present. The batch job creates its workspace at
+          # C:\ci\ws inside the container; we copy it out afterwards rather than
+          # mounting a nested volume (Windows containers handle nested mounts
+          # poorly).
+          # Pass CI_ARGS by NAME so Docker reads it from the environment without
+          # the shell re-parsing the embedded quotes in -G "Visual Studio 17 2022".
+          docker run --name ros2ci `
             --isolation=${{ inputs.isolation || 'process' }} `
             --env CI_ARGS `
-            -v "${{ github.workspace }}\container_out:C:\ci\ws" `
+            -v "${{ github.workspace }}:C:\ci" `
             $env:IMAGE_TAG
+          $rc = $LASTEXITCODE
+          Write-Host "Container exited with code $rc"
+          exit $rc
+
+      # Copy build/test results out of the (stopped) container for artifacts,
+      # even if the batch job failed. Then remove the container.
+      - name: Extract results from container
+        if: always()
+        shell: powershell
+        run: |
+          New-Item -ItemType Directory -Force -Path "${{ github.workspace }}\container_out" | Out-Null
+          $exists = docker ps -a --filter "name=ros2ci" --format "{{.Names}}"
+          if ($exists -eq 'ros2ci') {
+            # Copy the colcon log and build trees out; ignore failures if a path
+            # doesn't exist (e.g. build died very early).
+            docker cp ros2ci:C:\ci\ws\log        "${{ github.workspace }}\container_out\log"   2>$null
+            docker cp ros2ci:C:\ci\ws\build      "${{ github.workspace }}\container_out\build" 2>$null
+            docker rm ros2ci | Out-Null
+          } else {
+            Write-Host "Container 'ros2ci' not found; nothing to extract."
+          }
 
       - name: Upload results
         if: always()
