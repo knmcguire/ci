@@ -37,14 +37,17 @@ RUN powershell -noexit "New-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\C
 # While this makes the images larger, it also means that we are certain to
 # reuse the Docker layer cache, which should speed everything up.
 # run_ros2_batch.py will source the appropriate one.
-
-# Install MSVC 2019
-RUN powershell -noexit irm https://aka.ms/vs/16/release/vs_buildtools.exe -OutFile vs_buildtools_2019.exe
-RUN vs_buildtools_2019.exe --quiet --wait --norestart --add Microsoft.Component.MSBuild --add Microsoft.Net.Component.4.6.1.TargetingPack --add Microsoft.Net.Component.4.8.SDK --add Microsoft.VisualStudio.Component.CoreBuildTools --add Microsoft.VisualStudio.Component.Roslyn.Compiler --add Microsoft.VisualStudio.Component.TextTemplating --add Microsoft.VisualStudio.Component.VC.CLI.Support --add Microsoft.VisualStudio.Component.VC.CoreBuildTools --add Microsoft.VisualStudio.Component.VC.CoreIde --add Microsoft.VisualStudio.Component.VC.Redist.14.Latest --add Microsoft.VisualStudio.Component.VC.Tools.x86.x64 --add Microsoft.VisualStudio.Component.Windows10SDK --add Microsoft.VisualStudio.Component.Windows10SDK.19041 --add Microsoft.VisualStudio.ComponentGroup.NativeDesktop.Core --add Microsoft.VisualStudio.Workload.MSBuildTools --add Microsoft.VisualStudio.Workload.VCTools
+#
+# NOTE: The upstream image installs both MSVC 2019 and 2022. This build is
+# 2022-only (--visual-studio-version 2022), so the MSVC 2019 steps are removed.
+# They were also the point of failure on GitHub-hosted Windows container builds:
+# the VS 2019 bootstrapper's layer failed to commit with
+#   hcsshim::ImportLayer failed in Win32: The system cannot find the path specified. (0x3)
+# Dropping 2019 removes that failure and shortens the image build.
 
 # Install MSVC 2022
 RUN powershell -noexit irm https://aka.ms/vs/17/release/vs_buildtools.exe -OutFile vs_buildtools_2022.exe
-RUN vs_buildtools_2022.exe --quiet --wait --norestart --add Microsoft.Component.MSBuild --add Microsoft.Net.Component.4.6.1.TargetingPack --add Microsoft.Net.Component.4.8.SDK --add Microsoft.VisualStudio.Component.CoreBuildTools --add Microsoft.VisualStudio.Component.Roslyn.Compiler --add Microsoft.VisualStudio.Component.TextTemplating --add Microsoft.VisualStudio.Component.VC.CLI.Support --add Microsoft.VisualStudio.Component.VC.CoreBuildTools --add Microsoft.VisualStudio.Component.VC.CoreIde --add Microsoft.VisualStudio.Component.VC.Redist.14.Latest --add Microsoft.VisualStudio.Component.VC.Tools.x86.x64 --add Microsoft.VisualStudio.Component.Windows10SDK --add Microsoft.VisualStudio.Component.Windows10SDK.19041 --add Microsoft.VisualStudio.ComponentGroup.NativeDesktop.Core --add Microsoft.VisualStudio.Workload.MSBuildTools --add Microsoft.VisualStudio.Workload.VCTools
+RUN powershell -Command "$p = Start-Process -FilePath vs_buildtools_2022.exe -ArgumentList '--quiet','--wait','--norestart','--nocache','--add','Microsoft.Component.MSBuild','--add','Microsoft.Net.Component.4.6.1.TargetingPack','--add','Microsoft.Net.Component.4.8.SDK','--add','Microsoft.VisualStudio.Component.CoreBuildTools','--add','Microsoft.VisualStudio.Component.Roslyn.Compiler','--add','Microsoft.VisualStudio.Component.TextTemplating','--add','Microsoft.VisualStudio.Component.VC.CLI.Support','--add','Microsoft.VisualStudio.Component.VC.CoreBuildTools','--add','Microsoft.VisualStudio.Component.VC.CoreIde','--add','Microsoft.VisualStudio.Component.VC.Redist.14.Latest','--add','Microsoft.VisualStudio.Component.VC.Tools.x86.x64','--add','Microsoft.VisualStudio.Component.Windows10SDK','--add','Microsoft.VisualStudio.Component.Windows10SDK.19041','--add','Microsoft.VisualStudio.ComponentGroup.NativeDesktop.Core','--add','Microsoft.VisualStudio.Workload.MSBuildTools','--add','Microsoft.VisualStudio.Workload.VCTools' -Wait -PassThru -NoNewWindow; if ($p.ExitCode -ne 0 -and $p.ExitCode -ne 3010) { Write-Error \"VS install failed: $($p.ExitCode)\"; exit $p.ExitCode }; Remove-Item -Force vs_buildtools_2022.exe -ErrorAction SilentlyContinue"
 
 # Install pixi
 ## Fetch a pinned version
