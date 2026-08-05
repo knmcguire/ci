@@ -6,15 +6,41 @@ name: Windows CI (Docker container)
 # investigate whether running in a Windows container (vs directly on the runner)
 # explains infrastructural differences between Jenkins and GitHub Actions.
 #
-# Connext is omitted (patched Dockerfile at windows_docker_resources/Dockerfile
-# in this repo path). RTI steps are removed; keep --ignore-rmw rmw_connextdds.
+# ---------------------------------------------------------------------------
+# PARITY WITH JENKINS (nightly_win_rel) -- what this file matches and what it
+# deliberately cannot:
+#
+#   MATCHED here:
+#     * Host/base Windows build 26100 (Server 2025) via runs-on: windows-2025
+#       and an ltsc2025 base image tag. Jenkins host is 10.0.26100.x.
+#     * --isolation=process (base build <= host build, so no Hyper-V needed).
+#     * Isolated NAT network with inter-container comm disabled
+#       (com.docker.network.bridge.enable_icc=false), created and passed via
+#       --net, exactly like Jenkins.
+#     * --workspace-path C:\ci in CI_ARGS (Jenkins passes --workspace-path).
+#     * cmake-args WITHOUT an explicit -G/-A generator (Jenkins lets the batch
+#       script derive the generator from --visual-studio-version).
+#
+#   NOT matched (cannot be, in this repo):
+#     * RTI Connext. Jenkins bakes RTI Connext 7.7.0 into its image from a
+#       licensed installer and tests rmw_connextdds. This branch's Dockerfile
+#       is patched to remove RTI, and we keep --ignore-rmw rmw_connextdds.
+#       The MAJORITY of the Jenkins-only Windows failures are rmw_connextdds
+#       shutdown crashes (exit 0xC0000005) and will therefore NOT reproduce
+#       here even with identical server/network/args. Getting them back
+#       requires the RTI license + Connext in the image.
+#     * Hardware. Jenkins runs on AWS EC2; a hosted runner is fixed at
+#       ~4 vCPU / 16 GB. CPU count affects launch-test parallelism and
+#       shutdown-race timing. See the "self-hosted runner" note at the bottom
+#       to remove this variable too.
+# ---------------------------------------------------------------------------
 #
 # IMPORTANT constraints (see the Dockerfile comments):
-#   * The container base image (mcr.microsoft.com/windows/server:<ver>) must be
-#     the SAME or OLDER than the runner host build. If older, Hyper-V isolation
-#     is required for both build and run.
-#   * GitHub Actions' native `container:` key is Linux-only, so we drive Docker
-#     manually with `docker build` / `docker run` on a Windows runner.
+# * The container base image (mcr.microsoft.com/windows/server:<ver>) must be
+#   the SAME or OLDER than the runner host build. If older, Hyper-V isolation
+#   is required for both build and run.
+# * GitHub Actions' native `container:` key is Linux-only, so we drive Docker
+#   manually with `docker build` / `docker run` on a Windows runner.
 
 on:
   push:
@@ -41,19 +67,32 @@ on:
 env:
   ROS_DISTRO: ${{ inputs.ros_distro || 'rolling' }}
   IMAGE_TAG: ros2-ci-windows:local
+  # Name of the isolated NAT network, mirroring Jenkins' "isolated_network".
+  NETWORK_NAME: isolated_network
 
 jobs:
   windows-ci-docker:
-    # windows-2022 is used deliberately: its host build is a known quantity, which
-    # matters for matching the container base image version. (windows-2025 may
-    # require a newer base image than the Dockerfile's default resolves to.)
-    runs-on: windows-2022
+    # windows-2025 to match the Jenkins host kernel (Windows Server 2025, build
+    # 26100). NOTE: since June 2026 the windows-2025 label defaults to the
+    # Visual Studio 2026 image. Our CI_ARGS request VS 2022 / "Visual Studio 17
+    # 2022"; confirm the toolchain the container needs is present (the compiler
+    # lives INSIDE the container image, built by the Dockerfile, so the runner's
+    # own VS version does not have to match -- but keep --visual-studio-version
+    # consistent with whatever Jenkins currently uses). If you specifically need
+    # the VS2022 host image, pin `windows-2022` instead (build 20348) and accept
+    # that the kernel will then differ from Jenkins again.
+    runs-on: windows-2025
     timeout-minutes: 350
     env:
       # The batch script requires ROS_DOMAIN_ID; forwarded into the container below.
       ROS_DOMAIN_ID: 1
-      # Mirrors the CMD's %CI_ARGS%. Connext ignored (not installed in image).
-      CI_ARGS: ${{ inputs.ci_args || '--force-ansi-color --ignore-rmw rmw_fastrtps_dynamic_cpp rmw_connextdds --repo-file-url https://raw.githubusercontent.com/ros2/ros2/rolling/ros2.repos --colcon-mixin-url https://raw.githubusercontent.com/colcon/colcon-mixin-repository/master/index.yaml --cmake-build-type Release --visual-studio-version 2022 --build-args --event-handlers console_cohesion+ console_package_list+ --cmake-args -G "Visual Studio 17 2022" -A x64 -DINSTALL_EXAMPLES=OFF -DSECURITY=ON -DAPPEND_PROJECT_NAME_TO_INCLUDEDIR=ON --test-args --event-handlers console_cohesion+ --retest-until-pass 2 --ctest-args -LE xfail --pytest-args -m "not xfail"' }}
+      # Mirrors Jenkins' CI_ARGS as closely as possible:
+      #   * adds --workspace-path C:\ci   (Jenkins passes --workspace-path)
+      #   * drops -G "Visual Studio 17 2022" -A x64 from --cmake-args
+      #     (Jenkins does NOT pass an explicit generator; the batch script
+      #      derives it from --visual-studio-version)
+      #   * keeps --ignore-rmw rmw_connextdds (no Connext in this image)
+      CI_ARGS: ${{ inputs.ci_args || '--force-ansi-color --workspace-path C:\ci --ignore-rmw rmw_fastrtps_dynamic_cpp rmw_connextdds --repo-file-url https://raw.githubusercontent.com/ros2/ros2/rolling/ros2.repos --colcon-mixin-url https://raw.githubusercontent.com/colcon/colcon-mixin-repository/master/index.yaml --cmake-build-type Release --visual-studio-version 2022 --build-args --event-handlers console_cohesion+ console_package_list+ --cmake-args -DINSTALL_EXAMPLES=OFF -DSECURITY=ON -DAPPEND_PROJECT_NAME_TO_INCLUDEDIR=ON --test-args --event-handlers console_cohesion+ --retest-until-pass 2 --ctest-args -LE xfail --pytest-args -m "not xfail"' }}
 
     steps:
       - name: Checkout ci repository
@@ -98,9 +137,8 @@ jobs:
           }
           docker info
 
-      # Docker is preinstalled on the windows-2022 runner. Record host + docker
-      # info: the host OS build determines which base image tag is compatible
-      # and whether Hyper-V isolation is required.
+      # Record host + docker info: the host OS build determines which base image
+      # tag is compatible and whether Hyper-V isolation is required.
       - name: Report host and Docker info
         shell: powershell
         run: |
@@ -118,22 +156,28 @@ jobs:
           Write-Host "== docker info (isolation, os) =="
           docker info
 
-      # Build the image. The base image version defaults to the Dockerfile's ARG
-      # (2009); if that is older than the host it will require Hyper-V isolation.
-      # We pass the host's build as WINDOWS_RELEASE_VERSION so the base image
-      # matches the host and process isolation can be used.
+      # Build the image. We pass the host's build as WINDOWS_RELEASE_VERSION so
+      # the base image matches the host and process isolation can be used.
       - name: Build container image
         shell: powershell
         run: |
           $cv = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion'
-          # Compose a base-image tag matching the host build (e.g. "10.0.20348.xxxx").
-          # mcr Windows Server images are tagged by build; use ltsc2022 for build 20348.
+          # Compose a base-image tag matching the host build.
+          # mcr Windows Server images are tagged by build; ltsc2025 for 26100.
           $baseTag = switch ($cv.CurrentBuild) {
+            '26100' { 'ltsc2025' }        # Windows Server 2025  (matches Jenkins host)
             '20348' { 'ltsc2022' }        # Windows Server 2022
             '17763' { 'ltsc2019' }        # Windows Server 2019
-            default { 'ltsc2022' }
+            default { 'ltsc2025' }
           }
           Write-Host "Host build $($cv.CurrentBuild) -> base image tag: $baseTag"
+          # For EXACT parity with Jenkins (which pins 10.0.26100.<UBR> rather
+          # than the rolling ltsc alias), you can instead build a full version
+          # string and pass that:
+          #   $exact = "10.0.$($cv.CurrentBuild).$($cv.UBR)"
+          #   --build-arg WINDOWS_RELEASE_VERSION=$exact
+          # The ltsc alias is used here because it keeps process isolation valid
+          # on any 26100 UBR without chasing the host's exact patch level.
           docker build `
             --isolation=${{ inputs.isolation || 'process' }} `
             --build-arg WINDOWS_RELEASE_VERSION=$baseTag `
@@ -141,24 +185,48 @@ jobs:
             -f windows_docker_resources/Dockerfile `
             -t $env:IMAGE_TAG `
             .
-        # NOTE: build context is the repo root (.) so the Dockerfile can access
-        # the python scripts, exactly as the upstream comment requires.
+          # NOTE: build context is the repo root (.) so the Dockerfile can access
+          # the python scripts, exactly as the upstream comment requires.
 
-      # Run the batch job inside the container. Mount an output dir so results
-      # can be pulled back out to the runner and uploaded as artifacts.
+      # Create the isolated NAT network BEFORE running, mirroring Jenkins:
+      #   docker network create -d nat -o com.docker.network.bridge.enable_icc=false isolated_network
+      # This is an inter-container-communication-disabled NAT network. For a DDS
+      # test suite doing multicast discovery this is a materially different
+      # environment than Docker's default network, so matching it matters.
+      - name: Create isolated network (Jenkins parity)
+        shell: powershell
+        run: |
+          docker network inspect $env:NETWORK_NAME 2>$null 1>$null
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "Creating isolated NAT network '$env:NETWORK_NAME' (icc disabled)"
+            docker network create -d nat -o com.docker.network.bridge.enable_icc=false $env:NETWORK_NAME
+            if ($LASTEXITCODE -ne 0) { Write-Error "Failed to create network"; exit $LASTEXITCODE }
+          } else {
+            Write-Host "Network '$env:NETWORK_NAME' already exists; reusing."
+          }
+
+      # Run the batch job inside the container.
       - name: Run batch job in container
         shell: powershell
         run: |
-          # The image does not contain the ci repo's python scripts (the
-          # Dockerfile only ADDs pixi.toml). Mount the checkout at C:\ci so
-          # run_ros2_batch.py is present. The batch job creates its workspace at
-          # C:\ci\ws inside the container; we copy it out afterwards rather than
-          # mounting a nested volume (Windows containers handle nested mounts
-          # poorly).
+          # Mount the checkout at C:\ci so run_ros2_batch.py is present. The
+          # batch job creates its workspace at C:\ci\ws inside the container; we
+          # copy it out afterwards rather than mounting a nested volume (Windows
+          # containers handle nested mounts poorly).
+          #
+          # NOTE ON --rm vs --name: Jenkins uses --rm because it bind-mounts its
+          # host workspace and results land on the host directly. We instead keep
+          # the container (--name ros2ci) and `docker cp` results out in the next
+          # step -- this is the artifact-extraction path and does NOT change test
+          # behavior. If you want byte-for-byte parity with Jenkins' invocation,
+          # switch to --rm and rely solely on the bind-mounted C:\ci\ws on the
+          # runner (results are already under ${{ github.workspace }} then).
+          #
           # Pass CI_ARGS by NAME so Docker reads it from the environment without
-          # the shell re-parsing the embedded quotes in -G "Visual Studio 17 2022".
+          # the shell re-parsing the embedded quotes.
           docker run --name ros2ci `
             --isolation=${{ inputs.isolation || 'process' }} `
+            --net $env:NETWORK_NAME `
             --env CI_ARGS `
             --env ROS_DOMAIN_ID `
             -v "${{ github.workspace }}:C:\ci" `
@@ -180,12 +248,7 @@ jobs:
             Write-Host "Container 'ros2ci' not found; nothing to extract."
             exit 0
           }
-          # The container has EXITED by now (batch job finished, container stopped).
-          # docker cp works on stopped containers; docker exec does NOT (it needs a
-          # running container). The previous version probed with docker exec, which
-          # always failed here ("container is not running") and skipped every copy.
-          # The build writes to C:\ci\ws\build and C:\ci\ws\log (confirmed from
-          # the batch log), so copy those directly and tolerate any missing path.
+          # docker cp works on stopped containers; docker exec does NOT.
           function Copy-Path($srcInContainer, $dst) {
             Write-Host "Copying $srcInContainer -> $dst"
             docker cp "ros2ci:$srcInContainer" "$dst"
@@ -195,8 +258,16 @@ jobs:
           }
           Copy-Path "C:\ci\ws\log"   "${{ github.workspace }}\container_out\log"
           Copy-Path "C:\ci\ws\build" "${{ github.workspace }}\container_out\build"
-
           docker rm ros2ci | Out-Null
+          exit 0
+
+      # Clean up the isolated network so it doesn't leak between runs on a
+      # reused (e.g. self-hosted) runner. Harmless no-op on ephemeral runners.
+      - name: Remove isolated network
+        if: always()
+        shell: powershell
+        run: |
+          docker network rm $env:NETWORK_NAME 2>$null | Out-Null
           exit 0
 
       - name: Upload results
