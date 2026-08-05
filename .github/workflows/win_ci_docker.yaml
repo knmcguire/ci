@@ -14,9 +14,12 @@ name: Windows CI (Docker container)
 #     * Host/base Windows build 26100 (Server 2025) via runs-on: windows-2025
 #       and an ltsc2025 base image tag. Jenkins host is 10.0.26100.x.
 #     * --isolation=process (base build <= host build, so no Hyper-V needed).
-#     * Isolated NAT network with inter-container comm disabled
-#       (com.docker.network.bridge.enable_icc=false), created and passed via
-#       --net, exactly like Jenkins.
+#     * (Network) Jenkins creates a custom "isolated_network" nat network with
+#       com.docker.network.bridge.enable_icc=false. That option is a Linux-bridge
+#       concept and is effectively a NO-OP on Windows (HNS/Hyper-V switch), and
+#       we run a SINGLE container, so it has no behavioral effect. We therefore
+#       use the default nat network and skip the custom network to avoid the
+#       Windows HNS "second nat network" flakiness. See notes below.
 #     * --workspace-path C:\ci in CI_ARGS (Jenkins passes --workspace-path).
 #     * cmake-args WITHOUT an explicit -G/-A generator (Jenkins lets the batch
 #       script derive the generator from --visual-studio-version).
@@ -67,8 +70,6 @@ on:
 env:
   ROS_DISTRO: ${{ inputs.ros_distro || 'rolling' }}
   IMAGE_TAG: ros2-ci-windows:local
-  # Name of the isolated NAT network, mirroring Jenkins' "isolated_network".
-  NETWORK_NAME: isolated_network
 
 jobs:
   windows-ci-docker:
@@ -188,23 +189,6 @@ jobs:
           # NOTE: build context is the repo root (.) so the Dockerfile can access
           # the python scripts, exactly as the upstream comment requires.
 
-      # Create the isolated NAT network BEFORE running, mirroring Jenkins:
-      #   docker network create -d nat -o com.docker.network.bridge.enable_icc=false isolated_network
-      # This is an inter-container-communication-disabled NAT network. For a DDS
-      # test suite doing multicast discovery this is a materially different
-      # environment than Docker's default network, so matching it matters.
-      - name: Create isolated network (Jenkins parity)
-        shell: powershell
-        run: |
-          docker network inspect $env:NETWORK_NAME 2>$null 1>$null
-          if ($LASTEXITCODE -ne 0) {
-            Write-Host "Creating isolated NAT network '$env:NETWORK_NAME' (icc disabled)"
-            docker network create -d nat -o com.docker.network.bridge.enable_icc=false $env:NETWORK_NAME
-            if ($LASTEXITCODE -ne 0) { Write-Error "Failed to create network"; exit $LASTEXITCODE }
-          } else {
-            Write-Host "Network '$env:NETWORK_NAME' already exists; reusing."
-          }
-
       # Run the batch job inside the container.
       - name: Run batch job in container
         shell: powershell
@@ -226,7 +210,6 @@ jobs:
           # the shell re-parsing the embedded quotes.
           docker run --name ros2ci `
             --isolation=${{ inputs.isolation || 'process' }} `
-            --net $env:NETWORK_NAME `
             --env CI_ARGS `
             --env ROS_DOMAIN_ID `
             -v "${{ github.workspace }}:C:\ci" `
@@ -259,15 +242,6 @@ jobs:
           Copy-Path "C:\ci\ws\log"   "${{ github.workspace }}\container_out\log"
           Copy-Path "C:\ci\ws\build" "${{ github.workspace }}\container_out\build"
           docker rm ros2ci | Out-Null
-          exit 0
-
-      # Clean up the isolated network so it doesn't leak between runs on a
-      # reused (e.g. self-hosted) runner. Harmless no-op on ephemeral runners.
-      - name: Remove isolated network
-        if: always()
-        shell: powershell
-        run: |
-          docker network rm $env:NETWORK_NAME 2>$null | Out-Null
           exit 0
 
       - name: Upload results
