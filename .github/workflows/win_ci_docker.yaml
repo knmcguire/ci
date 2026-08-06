@@ -157,6 +157,10 @@ jobs:
           Write-Host "== docker info (isolation, os) =="
           docker info
 
+      - name: Clean up Docker
+        shell: powershell
+        run: docker system prune -a --volumes --force
+      
       # Build the image. We pass the host's build as WINDOWS_RELEASE_VERSION so
       # the base image matches the host and process isolation can be used.
       - name: Build container image
