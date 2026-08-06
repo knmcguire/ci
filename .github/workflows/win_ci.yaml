@@ -30,6 +30,7 @@ on:
           --build-args --event-handlers console_cohesion+ console_package_list+
           --cmake-args -DINSTALL_EXAMPLES=OFF -DSECURITY=ON -DAPPEND_PROJECT_NAME_TO_INCLUDEDIR=ON
           --test-args --event-handlers console_cohesion+
+          --executor sequential
           --retest-until-pass 2 --ctest-args -LE xfail --pytest-args -m "not xfail"
         type: string
 
@@ -49,7 +50,9 @@ jobs:
       # D:\a\ci\ci on hosted Windows runners). All colcon output lands here.
       WS_PATH: ${{ github.workspace }}\ws
       # Mirrors the CMD in the Dockerfile. Overridable via workflow_dispatch.
-      CI_ARGS: ${{ inputs.ci_args || '--force-ansi-color --ignore-rmw rmw_fastrtps_dynamic_cpp rmw_connextdds --repo-file-url https://raw.githubusercontent.com/ros2/ros2/rolling/ros2.repos --colcon-mixin-url https://raw.githubusercontent.com/colcon/colcon-mixin-repository/master/index.yaml --cmake-build-type Release --visual-studio-version 2022 --build-args --event-handlers console_cohesion+ console_package_list+ --cmake-args -DINSTALL_EXAMPLES=OFF -DSECURITY=ON -DAPPEND_PROJECT_NAME_TO_INCLUDEDIR=ON --test-args --event-handlers console_cohesion+ --retest-until-pass 2 --ctest-args -LE xfail --pytest-args -m "not xfail"' }}
+      # Serializing tests reduces framework-level flakiness on Windows more
+      # reliably than test retries alone.
+      CI_ARGS: ${{ inputs.ci_args || '--force-ansi-color --ignore-rmw rmw_fastrtps_dynamic_cpp rmw_connextdds --repo-file-url https://raw.githubusercontent.com/ros2/ros2/rolling/ros2.repos --colcon-mixin-url https://raw.githubusercontent.com/colcon/colcon-mixin-repository/master/index.yaml --cmake-build-type Release --visual-studio-version 2022 --build-args --event-handlers console_cohesion+ console_package_list+ --cmake-args -DINSTALL_EXAMPLES=OFF -DSECURITY=ON -DAPPEND_PROJECT_NAME_TO_INCLUDEDIR=ON --test-args --event-handlers console_cohesion+ --executor sequential --retest-until-pass 2 --ctest-args -LE xfail --pytest-args -m "not xfail"' }}
 
     steps:
       - name: Checkout ci repository
@@ -183,6 +186,23 @@ jobs:
           Write-Host "Found Visual Studio at: $vsRoot"
           "VCVARS64=$vcvars" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
+          # The pixi environment also ships a GNU coreutils link.exe, which can
+          # shadow MSVC's linker when Rust/Cargo resolves the bare tool name.
+          # Create a space-free junction to the MSVC Hostx64\x64 bin directory
+          # and export the linker path for the Run step.
+          $clHostDir = Get-ChildItem -Path (Join-Path $vsRoot 'VC\Tools\MSVC') -Recurse -Filter cl.exe -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -match '\\Hostx64\\x64\\cl.exe$' } |
+            Select-Object -First 1 | ForEach-Object { $_.DirectoryName }
+          if (-not $clHostDir) { Write-Error "Could not find Hostx64\x64 bin dir under $vsRoot"; exit 1 }
+          $junction = 'C:\msvcbin'
+          if (Test-Path $junction) { cmd /c rmdir "$junction" 2>$null }
+          New-Item -ItemType Junction -Path $junction -Target $clHostDir | Out-Null
+          $linkViaJunction = 'C:/msvcbin/link.exe'
+          if (-not (Test-Path $linkViaJunction)) { Write-Error "link.exe not reachable via junction $junction"; exit 1 }
+          Write-Host "MSVC bin dir : $clHostDir"
+          Write-Host "linker       : $linkViaJunction"
+          "MSVC_LINK=$linkViaJunction" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
       # Dockerfile CMD: run the batch job.
       #
       # colcon_cmake requires the MSVC environment (VisualStudioVersion et al.)
@@ -204,6 +224,8 @@ jobs:
             exit /b 1
           )
           echo VisualStudioVersion=%VisualStudioVersion%
+          echo MSVC_LINK=%MSVC_LINK%
+          set "CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER=%MSVC_LINK%"
           pixi run --manifest-path C:\pixi_ws\pixi.toml --frozen python run_ros2_batch.py %CI_ARGS%
 
       # Diagnostic: show what actually landed on disk under the workspace so
